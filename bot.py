@@ -266,9 +266,14 @@ def main():
 
     hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if hostname:
-        port = int(os.environ.get("PORT", 8443))
+        port = int(os.environ.get("PORT", 10000))
         logger.info(f"🚀 Iniciando Webhook na porta: {port}")
-        app.run_webhook(listen="0.0.0.0", port=port, webhook_url=f"https://{hostname}/{TOKEN}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TOKEN,  # <-- ESTA LINHA CORRIGE O ERRO 404
+            webhook_url=f"https://{hostname}/{TOKEN}"
+        )
     else:
         app.run_polling()
 
