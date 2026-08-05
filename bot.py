@@ -87,6 +87,7 @@ class ShopeeAffiliateAPI:
 
 # ---------- UTILITÁRIOS ----------
 def extract_item_id(url: str) -> int | None:
+    # Procura por padrões comuns de itemId em URLs da Shopee
     match_param = re.search(r"[?&](?:itemId|item_id)=(\d+)", url, re.IGNORECASE)
     if match_param:
         return int(match_param.group(1))
@@ -95,9 +96,14 @@ def extract_item_id(url: str) -> int | None:
     if match_path:
         return int(match_path.group(1))
 
-    match_product = re.search(r"/product/\d+/(\d+)", url)
+    match_product = re.search(r"/product/\d+/(\d+)", url) or re.search(r"/sp/product/(\d+)", url)
     if match_product:
         return int(match_product.group(1))
+        
+    # Padrão para URLs que terminam diretamente no ID do item
+    match_end_id = re.search(r"/(\d+)(?:\?|$)", url)
+    if match_end_id:
+        return int(match_end_id.group(1))
 
     return None
 
@@ -208,26 +214,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api = ShopeeAffiliateAPI(app_id, app_secret)
     full_url = resolve_short_link(raw_url)
 
-    # Define se a mensagem deve ser processada com Markdown ou como texto puro
     parse_mode = None
 
-    # 1. OPÇÃO CUPOM: Mantém mensagem idêntica trocando apenas o link
+    # 1. OPÇÃO CUPOM: Se houver texto adicional, substitui o link. Se for só o link, monta texto padrão.
     if choice == "type_cupom":
         aff_link = api.generate_short_link(raw_url) or api.generate_short_link(full_url)
         if not aff_link:
             await query.message.reply_text("❌ Erro ao converter o link de cupom.")
             return
-        formatted_msg = raw_text.replace(raw_url, aff_link)
-        parse_mode = None  # Mantém o formato original enviado pelo usuário
+        
+        if raw_text.strip() == raw_url.strip():
+            formatted_msg = f"🎟️ *CUPOM DE DESCONTO SHOPEE*\n\nResgate o seu cupom no link abaixo:\n👉 {aff_link}"
+            parse_mode = "Markdown"
+        else:
+            formatted_msg = raw_text.replace(raw_url, aff_link)
 
-    # 2. OPÇÃO OFERTA: Mantém mensagem idêntica trocando apenas o link
+    # 2. OPÇÃO OFERTA: Se houver texto adicional, substitui o link. Se for só o link, monta texto padrão.
     elif choice == "type_oferta":
         aff_link = api.generate_short_link(full_url) or api.generate_short_link(raw_url)
         if not aff_link:
             await query.message.reply_text("❌ Erro ao converter o link de oferta.")
             return
-        formatted_msg = raw_text.replace(raw_url, aff_link)
-        parse_mode = None  # Mantém o formato original enviado pelo usuário
+
+        if raw_text.strip() == raw_url.strip():
+            formatted_msg = f"🏷️ *OFERTA IMPERDÍVEL SHOPEE*\n\nAproveite a promoção no link abaixo:\n👉 {aff_link}"
+            parse_mode = "Markdown"
+        else:
+            formatted_msg = raw_text.replace(raw_url, aff_link)
 
     # 3. OPÇÃO LINK: Busca dados via API e gera cópia persuasiva do produto
     elif choice == "type_link":
@@ -237,12 +250,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if offer:
             aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
             formatted_msg = format_product_message(offer, aff_link)
-            parse_mode = "Markdown"  # Ativa o Markdown para renderizar os asteriscos em negrito
+            parse_mode = "Markdown"
         else:
             # Fallback se não achar o produto via API
             aff_link = api.generate_short_link(full_url) or api.generate_short_link(raw_url)
-            formatted_msg = raw_text.replace(raw_url, aff_link)
-            parse_mode = None
+            formatted_msg = f"🔥 *PRODUTO EM DESTAQUE NA SHOPEE*\n\nConfira as melhores condições de compra no link:\n👉 {aff_link}"
+            parse_mode = "Markdown"
 
     # Botão para envio direto ao WhatsApp
     whatsapp_share_url = f"https://api.whatsapp.com/send?text={urllib.parse.quote(formatted_msg)}"
