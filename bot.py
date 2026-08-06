@@ -196,8 +196,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     choice = query.data
-    raw_text = context.user_data.get("raw_text")
-    raw_url = context.user_data.get("raw_url")
+    raw_text = context.user_data.get("raw_text", "")
+    raw_url = context.user_data.get("raw_url", "")
 
     if not raw_text or not raw_url:
         await query.edit_message_text("⚠️ Os dados da mensagem expiraram. Envie o texto novamente.")
@@ -216,8 +216,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_url = resolve_short_link(raw_url)
 
     parse_mode = None
+    offer = None
 
-    # 1. OPÇÃO CUPOM: Se houver texto adicional, substitui o link. Se for só o link, monta texto padrão.
+    # Corrigir possíveis caracteres corrompidos na entrada
+    raw_text = raw_text.encode("utf-8", "ignore").decode("utf-8")
+
+    # 1. OPÇÃO CUPOM
     if choice == "type_cupom":
         aff_link = api.generate_short_link(raw_url) or api.generate_short_link(full_url)
         if not aff_link:
@@ -230,7 +234,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             formatted_msg = raw_text.replace(raw_url, aff_link)
 
-    # 2. OPÇÃO OFERTA: Se houver texto adicional, substitui o link. Se for só o link, monta texto padrão.
+    # 2. OPÇÃO OFERTA
     elif choice == "type_oferta":
         aff_link = api.generate_short_link(full_url) or api.generate_short_link(raw_url)
         if not aff_link:
@@ -243,7 +247,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             formatted_msg = raw_text.replace(raw_url, aff_link)
 
-    # 3. OPÇÃO LINK: Busca dados via API e gera cópia persuasiva do produto
+    # 3. OPÇÃO LINK
     elif choice == "type_link":
         item_id = extract_item_id(full_url) or extract_item_id(raw_url)
         offer = api.get_product_offer(item_id) if item_id else None
@@ -253,21 +257,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             formatted_msg = format_product_message(offer, aff_link)
             parse_mode = "Markdown"
         else:
-            # Fallback se não achar o produto via API
             aff_link = api.generate_short_link(full_url) or api.generate_short_link(raw_url)
             formatted_msg = f"🔥 *PRODUTO EM DESTAQUE NA SHOPEE*\n\nConfira as melhores condições de compra no link:\n👉 {aff_link}"
             parse_mode = "Markdown"
 
-    # Recupera a URL da imagem caso exista na oferta (opção LINK)
-    image_url = offer.get("imageUrl") if choice == "type_link" and offer else None
-
-    # Botão para envio direto ao WhatsApp
-    whatsapp_share_url = f"https://api.whatsapp.com/send?text={urllib.parse.quote(formatted_msg)}"
+    # Encoding seguro para a API do WhatsApp (evita o corte na URL)
+    encoded_text = urllib.parse.quote(formatted_msg, safe="")
+    whatsapp_share_url = f"https://api.whatsapp.com/send?text={encoded_text}"
+    
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📲 Compartilhar no WhatsApp", url=whatsapp_share_url)]
     ])
 
-    # Se houver imagem do produto, envia a FOTO com a mensagem na legenda (caption)
+    # Verifica se existe imagem (apenas para opção LINK)
+    image_url = offer.get("imageUrl") if choice == "type_link" and offer else None
+
     if image_url:
         try:
             await query.message.reply_photo(
@@ -280,7 +284,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Erro ao enviar foto: {e}")
 
-    # Fallback caso não haja imagem ou se for opção CUPOM/OFERTA
     await query.message.reply_text(
         formatted_msg,
         parse_mode=parse_mode,
