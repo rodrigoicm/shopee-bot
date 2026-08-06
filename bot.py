@@ -73,6 +73,7 @@ class ShopeeAffiliateAPI:
                     sales
                     shopName
                     offerLink
+                    imageUrl
                 }}
             }}
         }}"""
@@ -257,12 +258,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             formatted_msg = f"🔥 *PRODUTO EM DESTAQUE NA SHOPEE*\n\nConfira as melhores condições de compra no link:\n👉 {aff_link}"
             parse_mode = "Markdown"
 
+    # Recupera a URL da imagem caso exista na oferta (opção LINK)
+    image_url = offer.get("imageUrl") if choice == "type_link" and offer else None
+
     # Botão para envio direto ao WhatsApp
     whatsapp_share_url = f"https://api.whatsapp.com/send?text={urllib.parse.quote(formatted_msg)}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📲 Compartilhar no WhatsApp", url=whatsapp_share_url)]
     ])
 
+    # Se houver imagem do produto, envia a FOTO com a mensagem na legenda (caption)
+    if image_url:
+        try:
+            await query.message.reply_photo(
+                photo=image_url,
+                caption=formatted_msg,
+                parse_mode=parse_mode,
+                reply_markup=keyboard
+            )
+            return
+        except Exception as e:
+            logger.error(f"Erro ao enviar foto: {e}")
+
+    # Fallback caso não haja imagem ou se for opção CUPOM/OFERTA
     await query.message.reply_text(
         formatted_msg,
         parse_mode=parse_mode,
