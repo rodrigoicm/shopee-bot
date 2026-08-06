@@ -19,10 +19,44 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.environ["BOT_TOKEN"]
-URL_PATTERN = r"https?://(?:[a-zA-Z0-9-]+\.)?shopee\.com\.br/[^\s]+"
+
+# Regex abrangente para URLs da Shopee (inclui shopee.com.br, s.shopee.com.br, shope.ee, etc.)
+URL_PATTERN = r"https?://(?:[a-zA-Z0-9-]+\.)?(?:shopee\.com\.br|shope\.ee)/[^\s]+"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ---------- FUNÇÕES DE LIMPEZA E TRATAMENTO DE TEXTO ----------
+def clean_corrupted_text(text: str) -> str:
+    if not text:
+        return ""
+    # Remove apenas o caractere unicode de substituição (\ufffd) que costuma vir no lugar do %
+    cleaned = text.replace("\ufffd", "%")
+    # Ajusta possíveis duplicidades de porcentagem
+    cleaned = re.sub(r'%+', '%', cleaned)
+    return cleaned
+
+def remove_affiliate_disclaimers(text: str) -> str:
+    """Remove frases sobre apoio ao canal, café, transparência e hashtags de publi."""
+    if not text:
+        return ""
+
+    patterns = [
+        r"\*?\s*comprando (?:através|por meio) do link você (?:estará|está) ajudando[^\n]*",
+        r"\*?\s*você me paga um café[^\n]*",
+        r"\*?\s*ajude o canal[^\n]*",
+        r"#publi\b[^\n]*",
+        r"#ad\b[^\n]*",
+        r"#publicidade\b[^\n]*",
+    ]
+
+    cleaned_text = text
+    for pattern in patterns:
+        cleaned_text = re.sub(pattern, "", cleaned_text, flags=re.IGNORECASE)
+
+    # Limpa linhas vazias duplicadas deixadas pela remoção
+    cleaned_text = re.sub(r"\n\s*\n\s*\n", "\n\n", cleaned_text)
+    return cleaned_text.strip()
 
 # ---------- API SHOPEE AFFILIATE ----------
 class ShopeeAffiliateAPI:
@@ -79,7 +113,12 @@ class ShopeeAffiliateAPI:
         }}"""
         data = self._graphql_request(query)
         nodes = data.get("productOfferV2", {}).get("nodes", [])
-        return nodes[0] if nodes else None
+        if nodes:
+            offer = nodes[0]
+            if "productName" in offer and offer["productName"]:
+                offer["productName"] = clean_corrupted_text(offer["productName"])
+            return offer
+        return None
 
     def generate_short_link(self, origin_url: str) -> str:
         query = f'mutation {{ generateShortLink(input: {{originUrl: "{origin_url}"}}) {{ shortLink }} }}'
@@ -88,7 +127,6 @@ class ShopeeAffiliateAPI:
 
 # ---------- UTILITÁRIOS ----------
 def extract_item_id(url: str) -> int | None:
-    # Procura por padrões comuns de itemId em URLs da Shopee
     match_param = re.search(r"[?&](?:itemId|item_id)=(\d+)", url, re.IGNORECASE)
     if match_param:
         return int(match_param.group(1))
@@ -101,7 +139,6 @@ def extract_item_id(url: str) -> int | None:
     if match_product:
         return int(match_product.group(1))
         
-    # Padrão para URLs que terminam diretamente no ID do item
     match_end_id = re.search(r"/(\d+)(?:\?|$)", url)
     if match_end_id:
         return int(match_end_id.group(1))
@@ -124,21 +161,22 @@ def generate_persuasive_copy(offer: dict) -> str:
     discount = offer.get("priceDiscountRate")
     rating = offer.get("ratingStar")
     sales = offer.get("sales")
-    shop_name = offer.get("shopName")
 
-    lines = ["\n💡 *POR QUE VALE A PENA?*"]
+    lines = ["💡 *POR QUE VALE A PENA?*"]
 
     if discount and discount > 0:
-        lines.append(f"🔥 *{discount}% OFF* aplicado no item!")
+        lines.append(f"🔥 *{discount}% OFF* aplicado no item!\n")
     if sales and sales > 10:
         lines.append(f"📦 Mais de *{sales:,} unidades vendidas*!")
     if rating and float(rating) >= 4.0:
         lines.append(f"⭐ Avaliação: *{rating}/5.0*")
-    if shop_name:
-        lines.append(f"🏪 Loja: *{shop_name}*")
+    
+    # Campo de loja fixo para Shopee
+    lines.append("\n🏪 Loja: *Shopee*")
 
+    lines.append("\n\n🚚 *Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!*")
     lines.append("\n⚠️ *Atenção:* O estoque e o preço promocional podem mudar a qualquer momento.")
-    lines.append("👇 *Clique no link abaixo para garantir o seu:*")
+    lines.append("\n👇 *Clique no link abaixo para garantir o seu:*")
 
     return "\n".join(lines)
 
@@ -153,9 +191,9 @@ def format_product_message(offer: dict, link: str) -> str:
         p_min = float(price_min)
         p_max = float(price_max) if price_max else p_min
         if p_min != p_max and p_max > 0:
-            msg += f"💰 *Preço:* R$ {p_min:,.2f} - R$ {p_max:,.2f}\n".replace(",", "X").replace(".", ",").replace("X", ".")
+            msg += f"💰 *Preço:* R$ {p_min:,.2f} - R$ {p_max:,.2f}\n\n".replace(",", "X").replace(".", ",").replace("X", ".")
         else:
-            msg += f"💰 *Preço:* R$ {p_min:,.2f}\n".replace(",", "X").replace(".", ",").replace("X", ".")
+            msg += f"💰 *Preço:* R$ {p_min:,.2f}\n\n".replace(",", "X").replace(".", ",").replace("X", ".")
 
     msg += generate_persuasive_copy(offer)
     msg += f"\n👉 {link}"
@@ -166,16 +204,18 @@ def format_product_message(offer: dict, link: str) -> str:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = update.message.text or update.message.caption or ""
 
+    # Procura pela URL antes de aplicar modificações no texto
     match = re.search(URL_PATTERN, raw_text)
     if not match:
         await update.message.reply_text("👋 Nenhum link da Shopee foi encontrado na mensagem enviada.")
         return
 
-    # Salva o texto enviado temporariamente no contexto do usuário
-    context.user_data["raw_text"] = raw_text
+    # Limpa possíveis caracteres corrompidos do texto
+    cleaned_text = clean_corrupted_text(raw_text)
+
+    context.user_data["raw_text"] = cleaned_text
     context.user_data["raw_url"] = match.group(0).rstrip(".,;:!?)\n")
 
-    # Botões de escolha do tipo de mensagem
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎟️ CUPOM", callback_data="type_cupom")],
         [InlineKeyboardButton("🏷️ OFERTA", callback_data="type_oferta")],
@@ -215,70 +255,72 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api = ShopeeAffiliateAPI(app_id, app_secret)
     full_url = resolve_short_link(raw_url)
 
-    parse_mode = None
-    offer = None
+    item_id = extract_item_id(full_url) or extract_item_id(raw_url)
+    offer = api.get_product_offer(item_id) if item_id else None
+    image_url = offer.get("imageUrl") if offer else None
 
-    # Corrigir possíveis caracteres corrompidos na entrada
-    raw_text = raw_text.encode("utf-8", "ignore").decode("utf-8")
+    # Aplica a remoção dos avisos de afiliado/publi/café no texto original
+    clean_base_text = remove_affiliate_disclaimers(raw_text)
 
-    # 1. OPÇÃO CUPOM
     if choice == "type_cupom":
         aff_link = api.generate_short_link(raw_url) or api.generate_short_link(full_url)
         if not aff_link:
             await query.message.reply_text("❌ Erro ao converter o link de cupom.")
             return
         
-        if raw_text.strip() == raw_url.strip():
-            formatted_msg = f"🎟️ *CUPOM DE DESCONTO SHOPEE*\n\nResgate o seu cupom no link abaixo:\n👉 {aff_link}"
-            parse_mode = "Markdown"
+        if clean_base_text.strip() == raw_url.strip():
+            formatted_msg = f"🎟️ CUPOM DE DESCONTO SHOPEE\n\nResgate o seu cupom no link abaixo:\n👉 {aff_link}"
         else:
-            formatted_msg = raw_text.replace(raw_url, aff_link)
+            formatted_msg = clean_base_text.replace(raw_url, aff_link)
 
-    # 2. OPÇÃO OFERTA
     elif choice == "type_oferta":
         aff_link = api.generate_short_link(full_url) or api.generate_short_link(raw_url)
         if not aff_link:
             await query.message.reply_text("❌ Erro ao converter o link de oferta.")
             return
 
-        if raw_text.strip() == raw_url.strip():
-            formatted_msg = f"🏷️ *OFERTA IMPERDÍVEL SHOPEE*\n\nAproveite a promoção no link abaixo:\n👉 {aff_link}"
-            parse_mode = "Markdown"
+        free_shipping_notice = "🚚 *Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!*"
+
+        if clean_base_text.strip() == raw_url.strip():
+            formatted_msg = f"🏷️ OFERTA IMPERDÍVEL SHOPEE\n\n{free_shipping_notice}\n\nAproveite a promoção no link abaixo:\n👉 {aff_link}"
         else:
-            formatted_msg = raw_text.replace(raw_url, aff_link)
+            converted_text = clean_base_text.replace(raw_url, aff_link)
+            formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
 
-    # 3. OPÇÃO LINK
     elif choice == "type_link":
-        item_id = extract_item_id(full_url) or extract_item_id(raw_url)
-        offer = api.get_product_offer(item_id) if item_id else None
-
         if offer:
             aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
             formatted_msg = format_product_message(offer, aff_link)
-            parse_mode = "Markdown"
         else:
             aff_link = api.generate_short_link(full_url) or api.generate_short_link(raw_url)
-            formatted_msg = f"🔥 *PRODUTO EM DESTAQUE NA SHOPEE*\n\nConfira as melhores condições de compra no link:\n👉 {aff_link}"
-            parse_mode = "Markdown"
+            formatted_msg = (
+                f"🔥 PRODUTO EM DESTAQUE NA SHOPEE\n\n"
+                f"🏪 Loja: *Shopee*\n\n"
+                f"🚚 *Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!*\n\n"
+                f"Confira as melhores condições de compra no link:\n👉 {aff_link}"
+            )
 
-    # Encoding seguro para a API do WhatsApp (evita o corte na URL)
+    # Sanitização do texto final
+    formatted_msg = clean_corrupted_text(formatted_msg)
+
+    # --- MONTAGEM SEGURA DA URL DO WHATSAPP ---
+    # O asterisco (*) é mantido no texto para formatar o negrito na mensagem final do WhatsApp
     encoded_text = urllib.parse.quote(formatted_msg, safe="")
-    whatsapp_share_url = f"https://api.whatsapp.com/send?text={encoded_text}"
-    
+    encoded_text = encoded_text.replace("%25", "%2525")
+
+    whatsapp_share_url = f"https://wa.me/?text={encoded_text}"
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📲 Compartilhar no WhatsApp", url=whatsapp_share_url)]
     ])
-
-    # Verifica se existe imagem (apenas para opção LINK)
-    image_url = offer.get("imageUrl") if choice == "type_link" and offer else None
 
     if image_url:
         try:
             await query.message.reply_photo(
                 photo=image_url,
                 caption=formatted_msg,
-                parse_mode=parse_mode,
-                reply_markup=keyboard
+                reply_markup=keyboard,
+                parse_mode="Markdown"
             )
             return
         except Exception as e:
@@ -286,15 +328,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text(
         formatted_msg,
-        parse_mode=parse_mode,
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode="Markdown"
     )
 
 # ---------- MAIN ----------
 def main():
     app = Application.builder().token(TOKEN).build()
     
-    # Handlers para mensagens e para os botões do menu
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -305,7 +346,7 @@ def main():
         app.run_webhook(
             listen="0.0.0.0",
             port=port,
-            url_path=TOKEN,  # <-- ESTA LINHA CORRIGE O ERRO 404
+            url_path=TOKEN,
             webhook_url=f"https://{hostname}/{TOKEN}"
         )
     else:
