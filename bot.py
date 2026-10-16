@@ -8,13 +8,13 @@ import logging
 import asyncio
 import sys
 import requests
-import urllib.parse
-from typing import List  # adicione entre os imports
+from typing import List
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
     filters,
@@ -23,13 +23,35 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Browser, Playwright
 
+from database import init_db, add_to_queue
+from shopee_service import ShopeeAffiliateAPI as ServiceShopeeAPI
+
 load_dotenv()
 
 TOKEN = os.environ["BOT_TOKEN"]
+cuiaba_tz = timezone(timedelta(hours=-4))
+init_db()
 
-# Regexes para identificar links da Shopee e do Mercado Livre
+# ---------- CONFIGURAÇÕES DA EVOLUTION API LOCAL E GRUPOS ----------
+EVOLUTION_API_URL = os.environ.get("EVOLUTION_API_URL", "http://localhost:8080").rstrip(
+    "/"
+)
+EVOLUTION_API_KEY = os.environ.get("EVOLUTION_API_KEY", "")
+EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "chip_01")
+
+WHATSAPP_GROUP_PRINCIPAL = os.environ.get(
+    "WHATSAPP_GROUP_PRINCIPAL", "120363421300618666@g.us"
+)
+WHATSAPP_GROUP_PARCERIA = os.environ.get(
+    "WHATSAPP_GROUP_PARCERIA", "556596440424-1585878265@g.us"
+)
+
+ML_DEFAULT_CUPON_LINK = "https://mercadolivre.com/sec/2YCiHoZ"
+
+CONVITE_GRUPO = ""
+
 SHOPEE_URL_PATTERN = (
-    r"https?://(?:[a-zA-Z0-9-]+\.)?(?:shopee\.com\.br|shope\.ee)/[^\s]+"
+    r"https?://(?:[a-zA-Z0-9-]+\.)?(?:shopee\.com\.br|shope\.ee|br\.shp\.ee)/[^\s]+"
 )
 ML_URL_PATTERN = r"https?://(?:[a-zA-Z0-9-]+\.)?(?:mercadolivre\.com\.br|mercadolivre\.com|mercadolibre\.com\.br|mercadolibre\.com|ml\.br|meli\.la)/[^\s]+"
 
@@ -37,7 +59,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ---------- ESTADO GLOBAL DO MERCADO LIVRE (browser reaproveitado + cookies em memória) ----------
+# ---------- ESTADO GLOBAL DO MERCADO LIVRE ----------
 @dataclass
 class MLState:
     playwright: Playwright | None = None
@@ -54,8 +76,6 @@ ml_state = MLState()
 
 
 def get_cookie_expiration(cookies_dict: dict) -> datetime | None:
-    """Lê o storage_state do Playwright e retorna a data de expiração mais próxima
-    entre os cookies com validade definida (ignora cookies de sessão sem 'expires')."""
     expirations = [
         c["expires"]
         for c in cookies_dict.get("cookies", [])
@@ -67,8 +87,6 @@ def get_cookie_expiration(cookies_dict: dict) -> datetime | None:
 
 
 def load_ml_cookies() -> None:
-    """Carrega o storage_state do Mercado Livre a partir da variável de ambiente
-    ML_COOKIES_JSON, mantendo tudo em memória (nunca grava em disco)."""
     cookies_json_str = os.environ.get("ML_COOKIES_JSON")
     if not cookies_json_str:
         logger.warning(
@@ -94,8 +112,6 @@ def load_ml_cookies() -> None:
 
 
 async def maybe_warn_cookie_expiration(update: Update) -> None:
-    """Envia um aviso, no máximo uma vez por dia, quando o cookie do ML está perto
-    de vencer (ou já venceu). Disparado na primeira interação do dia com o bot."""
     if not ml_state.cookies_expiration:
         return
 
@@ -111,18 +127,94 @@ async def maybe_warn_cookie_expiration(update: Update) -> None:
 
     if days_left >= 0:
         aviso = (
-            f"⚠️ *Atenção:* o cookie de sessão do Mercado Livre vence em "
-            f"*{ml_state.cookies_expiration:%d/%m/%Y}* (em {days_left} dia(s)). "
+            f"⚠️ <b>Atenção:</b> o cookie de sessão do Mercado Livre vence em "
+            f"<b>{ml_state.cookies_expiration:%d/%m/%Y}</b> (em {days_left} dia(s)). "
             f"Providencie a renovação em breve."
         )
     else:
         aviso = (
-            f"🚨 *O cookie de sessão do Mercado Livre já venceu* "
+            f"🚨 <b>O cookie de sessão do Mercado Livre já venceu</b> "
             f"(vencimento em {ml_state.cookies_expiration:%d/%m/%Y}). "
             f"As conversões de link do Mercado Livre podem falhar até a renovação."
         )
 
-    await update.message.reply_text(aviso, parse_mode="Markdown")
+    await update.message.reply_text(aviso, parse_mode="HTML")
+
+
+# ---------- CONVERSÃO DE HTML PARA O WHATSAPP ----------
+def convert_html_to_whatsapp(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"*\1*", text, flags=re.DOTALL)
+    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"_\1_", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", "", text)
+    return text
+
+
+# ---------- FUNÇÕES DE ENVIO PARA O WHATSAPP ----------
+async def send_whatsapp_offer(
+    group_id: str,
+    message: str,
+    media_url: str | None = None,
+) -> bool:
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        logger.error("❌ Credenciais da Evolution API não configuradas.")
+        return False
+
+    final_message = convert_html_to_whatsapp(message)
+
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _request():
+            headers = {"apikey": EVOLUTION_API_KEY}
+
+            if media_url:
+                try:
+                    media_resp = requests.get(media_url, timeout=20)
+                    if media_resp.status_code == 200:
+                        url_api = f"{EVOLUTION_API_URL}/message/sendMedia/{EVOLUTION_INSTANCE}"
+                        files = {
+                            "file": (
+                                "oferta_qualidade.jpg",
+                                media_resp.content,
+                                "image/jpeg",
+                            )
+                        }
+                        data = {
+                            "number": group_id,
+                            "mediatype": "image",
+                            "caption": final_message,
+                            "fileName": "oferta_qualidade.jpg",
+                        }
+
+                        res = requests.post(
+                            url_api, data=data, files=files, headers=headers, timeout=40
+                        )
+                        if res.status_code in [200, 201]:
+                            return res
+                        else:
+                            logger.warning(
+                                f"⚠️ Falha no envio de mídia ({res.text}), tentando fallback para texto..."
+                            )
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro ao baixar mídia para envio: {e}")
+
+            url_api = f"{EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+            payload = {"number": group_id, "text": final_message, "delay": 1200}
+            headers["Content-Type"] = "application/json"
+            return requests.post(url_api, json=payload, headers=headers, timeout=15)
+
+        response = await loop.run_in_executor(None, _request)
+        if response.status_code in [200, 201]:
+            logger.info(f"✅ Oferta enviada com sucesso para o WhatsApp ({group_id})")
+            return True
+        else:
+            logger.error(f"❌ Erro ao enviar para o WhatsApp: {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Exceção ao enviar mensagem para o WhatsApp: {e}")
+        return False
 
 
 # ---------- FUNÇÕES DE LIMPEZA E TRATAMENTO DE TEXTO ----------
@@ -134,8 +226,13 @@ def clean_corrupted_text(text: str) -> str:
     return cleaned
 
 
+def escape_html(text: str) -> str:
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def remove_affiliate_disclaimers(text: str) -> str:
-    """Remove frases sobre apoio ao canal, café, transparência e hashtags de publi."""
     if not text:
         return ""
 
@@ -146,6 +243,10 @@ def remove_affiliate_disclaimers(text: str) -> str:
         r"#publi\b[^\n]*",
         r"#ad\b[^\n]*",
         r"#publicidade\b[^\n]*",
+        r"-?\s*anúncio\b[^\n]*",
+        r"🫵🏼.*?(?:\n|$)",
+        r"Convide Amigos.*?(?:\n|$)",
+        r"https?://(?:chat\.whatsapp\.com|t\.me|grupos\.[^\s]+)[^\n]*",
     ]
 
     cleaned_text = text
@@ -157,7 +258,6 @@ def remove_affiliate_disclaimers(text: str) -> str:
 
 
 def resolve_short_link(short_url: str) -> str:
-    """Extrai a URL bruta do produto caso caia em redirecionamentos via HTTP estático."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
@@ -194,57 +294,48 @@ def resolve_short_link(short_url: str) -> str:
 
 
 def format_price(value: float) -> str:
-    """Formata um valor numérico para o padrão de moeda brasileiro (ex: R$ 59,75)."""
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def format_ml_price_line(
     current_price: float | None, original_price: float | None
 ) -> str:
-    """Gera a linha de preço formatada para as mensagens do Mercado Livre."""
     if not current_price:
         return ""
     if original_price and original_price > current_price:
-        return f"💰 *Preço:* de {format_price(original_price)} por *{format_price(current_price)}*\n\n"
-    return f"💰 *Preço:* *{format_price(current_price)}*\n\n"
+        return (
+            f"💰 <b>Preço:</b> de {format_price(original_price)} "
+            f"por <b>{format_price(current_price)}</b>\n\n"
+        )
+    return f"💰 <b>Preço:</b> <b>{format_price(current_price)}</b>\n\n"
 
 
 async def resolve_product_url(page, url: str) -> str | None:
-    """Navega para a URL e retorna a URL final do produto (sem parâmetros)."""
     try:
         await page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(2.5)
 
-        if "/social/" in page.url or "social" in url or "meli.la" in url:
-            target_href = await page.evaluate("""() => {
-                const links = Array.from(document.querySelectorAll('a[href]'));
-                for (const a of links) {
-                    const href = a.href;
-                    if (href.includes('produto.mercadolivre.com.br/MLB') || href.includes('/p/MLB')) {
-                        return href;
-                    }
-                }
-                return null;
-            }""")
+        target_href = await page.evaluate("""() => {
+            const linkEl = document.querySelector('a.poly-component__link, a[class*="poly-component__link"]');
+            if (linkEl && linkEl.href) {
+                return linkEl.href;
+            }
 
-            if target_href:
-                resolved = target_href.split("?")[0].split("#")[0]
-                await page.goto(
-                    target_href, timeout=30000, wait_until="domcontentloaded"
-                )
-                await asyncio.sleep(2.0)
-                return resolved.split("?")[0].split("#")[0]
+            const allLinks = Array.from(document.querySelectorAll('a'));
+            const found = allLinks.find(el => el.innerText && (el.innerText.includes('Ir para produto') || el.innerText.includes('Ir para o produto')));
+            if (found && found.href) {
+                return found.href;
+            }
 
-            go_to_btn = page.locator(
-                "a[href*='produto.mercadolivre'], a[href*='/p/MLB'], a:has-text('Ir para o produto'), a:has-text('Ver produto')"
-            ).first
-            if await go_to_btn.is_visible(timeout=5000):
-                await go_to_btn.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(2.0)
-                return page.url.split("?")[0].split("#")[0]
+            return null;
+        }""")
+
+        if target_href:
+            resolved = target_href.split("?")[0].split("#")[0]
+            return resolved
 
         return page.url.split("?")[0].split("#")[0]
+
     except Exception as e:
         logger.error(f"Erro ao resolver URL {url}: {e}")
         return None
@@ -252,8 +343,6 @@ async def resolve_product_url(page, url: str) -> str | None:
 
 # ---------- PLAYWRIGHT: MERCADO LIVRE AFILIADOS ----------
 async def convert_mercadolivre_link(product_url: str) -> dict | None:
-    """Converte um link do Mercado Livre em link de afiliado e extrai dados do produto.
-    Reaproveita o browser global (ml_state.browser) e os cookies em memória."""
     if ml_state.browser is None or ml_state.cookies_dict is None:
         logger.error("❌ Browser ou cookies do Mercado Livre não inicializados.")
         return None
@@ -276,16 +365,11 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
             )
             page = await context.new_page()
 
-            # Resolver URL do produto
             product_url_final = await resolve_product_url(page, clean_url)
             if not product_url_final:
-                logger.error("❌ Não foi possível resolver a URL do produto.")
                 return None
 
-            # A página já está na URL final do produto, podemos extrair dados
-            # (O código de extração continua o mesmo, mas agora a página já está no produto)
-            product_info = await page.evaluate("""() => {
-                // Título
+            product_info = await page.evaluate(r"""() => {
                 let title = "";
                 const h1 = document.querySelector('h1.ui-pdp-title, h1.poly-component__title, .ui-pdp-header__title-container h1, h1');
                 if (h1 && h1.innerText) {
@@ -295,7 +379,6 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                     if (ogTitle && ogTitle.content) title = ogTitle.content.trim();
                 }
 
-                // Imagem
                 let imageUrl = null;
                 const ogImage = document.querySelector('meta[property="og:image"]');
                 if (ogImage && ogImage.content) {
@@ -305,14 +388,13 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                     if (img) imageUrl = img.src;
                 }
 
-                // Parser de preços
                 function parseAndesAmount(el) {
                     if (!el) return null;
                     const fractionEl = el.querySelector('.andes-money-amount__fraction');
                     if (!fractionEl) return null;
                     const centsEl = el.querySelector('.andes-money-amount__cents');
-                    const fraction = fractionEl.innerText.replace(/\\D/g, '');
-                    const cents = centsEl ? centsEl.innerText.replace(/\\D/g, '') : '00';
+                    const fraction = fractionEl.innerText.replace(/\D/g, '');
+                    const cents = centsEl ? centsEl.innerText.replace(/\D/g, '') : '00';
                     const val = parseFloat(fraction + '.' + cents);
                     return isNaN(val) ? null : val;
                 }
@@ -346,7 +428,6 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                     }
                 }
 
-                // AVALIAÇÃO E VENDAS (com novos seletores)
                 let rating = null;
                 let reviewsCount = null;
                 const ratingSelectors = [
@@ -378,7 +459,7 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                 for (const sel of reviewsSelectors) {
                     const el = document.querySelector(sel);
                     if (el) {
-                        const digits = el.innerText.trim().replace(/\\D/g, '');
+                        const digits = el.innerText.trim().replace(/\D/g, '');
                         if (digits) {
                             reviewsCount = parseInt(digits, 10);
                             break;
@@ -396,7 +477,7 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                 for (const sel of salesSelectors) {
                     const el = document.querySelector(sel);
                     if (el) {
-                        const digits = el.innerText.trim().replace(/\\D/g, '');
+                        const digits = el.innerText.trim().replace(/\D/g, '');
                         if (digits) {
                             sales = parseInt(digits, 10);
                             break;
@@ -415,13 +496,6 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                 };
             }""")
 
-            logger.info(f"🎯 URL Final do Produto: {product_url_final}")
-            logger.info(
-                f"📦 Título: {product_info.get('title') if product_info else 'N/A'}"
-            )
-
-            # AGORA GERAR O LINK DE AFILIADO (mesmo código de antes, mas usando product_url_final)
-            logger.info("🌐 Navegando para o LinkBuilder do Mercado Livre...")
             await page.goto(
                 "https://www.mercadolivre.com.br/afiliados/linkbuilder",
                 timeout=25000,
@@ -449,7 +523,6 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                 input_el = page.locator(input_selector).first
             await input_el.wait_for(state="visible", timeout=10000)
 
-            logger.info("✍️ Preenchendo a URL no campo do LinkBuilder (Ctrl+V)...")
             await input_el.click()
             await asyncio.sleep(0.5)
             await page.evaluate(
@@ -473,9 +546,7 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                     "main button:not([disabled])", timeout=10000
                 )
             except Exception:
-                logger.warning(
-                    "⚠️ Botão não ativou via wait_for_selector. Tentando forçar..."
-                )
+                pass
             await btn.click()
             await asyncio.sleep(2.5)
 
@@ -489,7 +560,7 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
             except Exception:
                 await asyncio.sleep(2.0)
 
-            affiliate_url = await page.evaluate("""() => {
+            affiliate_url = await page.evaluate(r"""() => {
                 const inputs = Array.from(document.querySelectorAll('main input, main textarea, input, textarea'));
                 for (const input of inputs) {
                     if (input.value && (input.value.includes('meli.la') || input.value.includes('mercadolivre.com.br/sec/'))) {
@@ -497,13 +568,12 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                     }
                 }
                 const bodyText = document.body.innerText;
-                const match = bodyText.match(/https?:\\/\\/(?:meli\\.la|www\\.mercadolivre\\.com\\.br\\/sec\\/)[^\\s"']+/);
+                const match = bodyText.match(/https?:\/\/(?:meli\.la|www\.mercadolivre\.com\.br\/sec\/)[^\s"']+/);
                 if (match) return match[0];
                 return null;
             }""")
 
             if affiliate_url and "http" in affiliate_url:
-                logger.info(f"✅ Link de Afiliado Gerado: {affiliate_url}")
                 return {
                     "affiliate_url": affiliate_url.strip(),
                     "image_url": (
@@ -523,13 +593,10 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
                     "sales": product_info.get("sales") if product_info else None,
                 }
 
-            logger.error("⚠️ Não foi possível extrair a URL gerada.")
             return None
 
         except Exception as e:
-            logger.error(
-                f"❌ Erro ao converter link do Mercado Livre via Playwright: {e}"
-            )
+            logger.error(f"❌ Erro ao converter link do Mercado Livre: {e}")
             return None
         finally:
             if context is not None:
@@ -537,8 +604,6 @@ async def convert_mercadolivre_link(product_url: str) -> dict | None:
 
 
 async def ml_worker() -> None:
-    """Processa as conversões de link do Mercado Livre uma de cada vez,
-    evitando disputa pelo mesmo browser/cookies e sobrecarga de memória."""
     while True:
         job = await ml_state.queue.get()
         product_url: str = job["product_url"]
@@ -548,166 +613,13 @@ async def ml_worker() -> None:
             if not future.cancelled():
                 future.set_result(result)
         except Exception as e:
-            logger.error(f"❌ Erro no worker do Mercado Livre: {e}")
             if not future.cancelled():
                 future.set_exception(e)
         finally:
             ml_state.queue.task_done()
 
 
-async def convert_multiple_mercadolivre_links(urls: List[str]) -> List[str] | None:
-    """Recebe uma lista de URLs do Mercado Livre e retorna uma lista de links de afiliado na mesma ordem."""
-    if ml_state.browser is None or ml_state.cookies_dict is None:
-        logger.error("❌ Browser ou cookies do Mercado Livre não inicializados.")
-        return None
-
-    async with ml_state.lock:
-        context = None
-        try:
-            context = await ml_state.browser.new_context(
-                storage_state=ml_state.cookies_dict,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                viewport={"width": 1366, "height": 768},
-                permissions=["clipboard-read", "clipboard-write"],
-            )
-            page = await context.new_page()
-
-            # Resolver cada URL para a URL final do produto
-            product_urls = []
-            for url in urls:
-                clean_url = (
-                    re.search(ML_URL_PATTERN, url).group(0).rstrip(".,;:!?)\n ")
-                    if re.search(ML_URL_PATTERN, url)
-                    else url.strip()
-                )
-                product_final = await resolve_product_url(page, clean_url)
-                if not product_final:
-                    logger.warning(f"⚠️ Não foi possível resolver a URL: {clean_url}")
-                    product_final = clean_url
-                product_urls.append(product_final)
-
-            # Navegar para o LinkBuilder
-            logger.info("🌐 Navegando para o LinkBuilder do Mercado Livre...")
-            await page.goto(
-                "https://www.mercadolivre.com.br/afiliados/linkbuilder",
-                timeout=25000,
-                wait_until="domcontentloaded",
-            )
-            await asyncio.sleep(2.0)
-
-            if "login" in page.url or "navigation" in page.url:
-                logger.error("❌ Sessão expirada! Redirecionado para login.")
-                return None
-
-            reset_btn = (
-                page.locator("main button")
-                .filter(has_text=re.compile(r"Criar outro|Gerar outro|Limpar", re.I))
-                .first
-            )
-            if await reset_btn.is_visible(timeout=2000):
-                await reset_btn.click()
-                await asyncio.sleep(1.0)
-
-            input_selector = "textarea[name*='link'], textarea[id*='link'], textarea.andes-form-control__field, input[placeholder*='http'], textarea[placeholder*='http']"
-            input_el = page.locator(input_selector).first
-            if not await input_el.is_visible(timeout=5000):
-                input_selector = "main textarea, main input[type='text']"
-                input_el = page.locator(input_selector).first
-            await input_el.wait_for(state="visible", timeout=10000)
-
-            # Colar todos os URLs finais, um por linha
-            text_to_paste = "\n".join(product_urls)
-            logger.info(f"✍️ Colando {len(product_urls)} URLs no LinkBuilder...")
-            await input_el.click()
-            await asyncio.sleep(0.5)
-            await page.evaluate(
-                "(text) => navigator.clipboard.writeText(text)", text_to_paste
-            )
-            modifier = "Meta" if sys.platform == "darwin" else "Control"
-            await page.keyboard.press(f"{modifier}+v")
-            await asyncio.sleep(1.5)
-            await page.dispatch_event(input_selector, "input")
-            await page.dispatch_event(input_selector, "change")
-            await page.keyboard.press("Tab")
-            await asyncio.sleep(2.0)
-
-            btn = (
-                page.locator("main button")
-                .filter(has_text=re.compile(r"^Gerar$", re.I))
-                .first
-            )
-            try:
-                await page.wait_for_selector(
-                    "main button:not([disabled])", timeout=10000
-                )
-            except Exception:
-                logger.warning(
-                    "⚠️ Botão não ativou via wait_for_selector. Tentando forçar..."
-                )
-            await btn.click()
-            await asyncio.sleep(3.0)  # tempo extra para múltiplos
-
-            # Capturar todos os links gerados
-            logger.info("⏳ Capturando links de afiliado gerados...")
-            affiliate_links = await page.evaluate("""() => {
-                const links = [];
-                const inputs = Array.from(document.querySelectorAll('main input, main textarea, input, textarea'));
-                for (const input of inputs) {
-                    if (input.value && (input.value.includes('meli.la') || input.value.includes('mercadolivre.com.br/sec/'))) {
-                        links.push(input.value.trim());
-                    }
-                }
-                if (links.length === 0) {
-                    const bodyText = document.body.innerText;
-                    const matches = bodyText.match(/https?:\\/\\/(?:meli\\.la|www\\.mercadolivre\\.com\\.br\\/sec\\/)[^\\s"']+/g);
-                    if (matches) {
-                        for (const m of matches) {
-                            links.push(m.trim());
-                        }
-                    }
-                }
-                return links;
-            }""")
-
-            if affiliate_links and len(affiliate_links) > 0:
-                # Se o número de links gerados não bater, tentamos usar os que temos ou fallback
-                if len(affiliate_links) != len(urls):
-                    logger.warning(
-                        f"⚠️ Número de links gerados ({len(affiliate_links)}) difere do esperado ({len(urls)}). Tentando reextrair..."
-                    )
-                    await asyncio.sleep(2.0)
-                    affiliate_links = await page.evaluate("""() => {
-                        const links = [];
-                        const inputs = Array.from(document.querySelectorAll('main input, main textarea, input, textarea'));
-                        for (const input of inputs) {
-                            if (input.value && (input.value.includes('meli.la') || input.value.includes('mercadolivre.com.br/sec/'))) {
-                                links.push(input.value.trim());
-                            }
-                        }
-                        return links;
-                    }""")
-                # Se ainda assim não bater, retornamos os que temos (ou None)
-                if len(affiliate_links) == len(urls):
-                    return affiliate_links
-                elif len(affiliate_links) > 0:
-                    # Retorna o que temos, mesmo que quantidade diferente (pode ser que alguns não geraram)
-                    return affiliate_links
-                else:
-                    return None
-
-            logger.error("⚠️ Nenhum link de afiliado foi gerado.")
-            return None
-
-        except Exception as e:
-            logger.error(f"❌ Erro no processamento múltiplo: {e}")
-            return None
-        finally:
-            if context is not None:
-                await context.close()
-
-
 async def enqueue_ml_conversion(product_url: str) -> dict | None:
-    """Coloca uma conversão de link do ML na fila e aguarda o resultado."""
     future: asyncio.Future = asyncio.get_running_loop().create_future()
     await ml_state.queue.put({"product_url": product_url, "future": future})
     return await future
@@ -810,47 +722,48 @@ def generate_persuasive_copy(offer: dict, store_name: str = "Shopee") -> str:
     rating = offer.get("ratingStar")
     sales = offer.get("sales")
 
-    lines = ["💡 *POR QUE VALE A PENA?*"]
+    lines = ["💡 <b>POR QUE VALE A PENA?</b>"]
 
     if discount and discount > 0:
-        lines.append(f"🔥 *{discount}% OFF* aplicado no item!\n")
+        lines.append(f"🔥 <b>{discount}% OFF</b> aplicado no item!\n")
     if sales and sales > 10:
-        lines.append(f"📦 Mais de *{sales:,} unidades vendidas*!")
+        lines.append(f"📦 Mais de <b>{sales:,} unidades vendidas</b>!")
     if rating and float(rating) >= 4.0:
-        lines.append(f"⭐ Avaliação: *{rating}/5.0*")
+        lines.append(f"⭐ Avaliação: <b>{rating}/5.0</b>")
 
-    lines.append(f"\n🏪 Loja: *{store_name}*")
-
+    lines.append(f"\n🏪 Loja: <b>{escape_html(store_name)}</b>")
     lines.append(
-        "\n\n🚚 *Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!*"
+        "\n\n🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>"
     )
     lines.append(
-        "\n⚠️ *Atenção:* O estoque e o preço promocional podem mudar a qualquer momento."
+        "\n⚠️ <b>Atenção:</b> O estoque e o preço promocional podem mudar a qualquer momento."
     )
-    lines.append("\n👇 *Clique no link abaixo para garantir o seu:*")
+    lines.append("\n👇 <b>Clique no link abaixo para garantir o seu:</b>")
 
     return "\n".join(lines)
 
 
 def format_product_message(offer: dict, link: str, store_name: str = "Shopee") -> str:
-    name = offer.get("productName", "Produto Incrível")
+    name = escape_html(offer.get("productName", "Produto Incrível"))
     price_min = offer.get("priceMin")
     price_max = offer.get("priceMax")
 
-    msg = f"🔥 *{name}*\n\n"
+    msg = f"🔥 <b>{name}</b>\n\n"
 
     if price_min:
         p_min = float(price_min)
         p_max = float(price_max) if price_max else p_min
         if p_min != p_max and p_max > 0:
             msg += (
-                f"💰 *Preço:* R$ {p_min:,.2f} - R$ {p_max:,.2f}\n\n".replace(",", "X")
+                f"💰 <b>Preço:</b> R$ {p_min:,.2f} - R$ {p_max:,.2f}\n\n".replace(
+                    ",", "X"
+                )
                 .replace(".", ",")
                 .replace("X", ".")
             )
         else:
             msg += (
-                f"💰 *Preço:* R$ {p_min:,.2f}\n\n".replace(",", "X")
+                f"💰 <b>Preço:</b> R$ {p_min:,.2f}\n\n".replace(",", "X")
                 .replace(".", ",")
                 .replace("X", ".")
             )
@@ -861,29 +774,58 @@ def format_product_message(offer: dict, link: str, store_name: str = "Shopee") -
     return msg
 
 
+# ---------- COMANDO /gerar PARA LISTA AUTOMÁTICA SHOPEE ----------
+async def handle_gerar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    app_id = os.environ.get("SHOPEE_APP_ID")
+    app_secret = os.environ.get("SHOPEE_APP_SECRET")
+    if not app_id or not app_secret:
+        await update.message.reply_text(
+            "❌ Credenciais da API da Shopee não configuradas."
+        )
+        return
+
+    count = 15
+    if context.args and context.args[0].isdigit():
+        count = max(1, min(50, int(context.args[0])))
+
+    today_str = datetime.now(cuiaba_tz).strftime("%Y-%m-%d")
+    status_msg = await update.message.reply_text(
+        f"🎲 Buscando e embaralhando <b>{count} ofertas (TOP_PERFORMING)</b> na API da Shopee...",
+        parse_mode="HTML",
+    )
+
+    loop = asyncio.get_running_loop()
+    service_api = ServiceShopeeAPI(app_id, app_secret)
+    added = await loop.run_in_executor(
+        None, service_api.generate_auto_offers_to_queue, count, today_str
+    )
+
+    await status_msg.edit_text(
+        f"✅ <b>{added} novas ofertas da Shopee</b> foram geradas de forma aleatória (sem repetir os últimos 2 dias) e inseridas direto na Fila do Portal para hoje (<b>{today_str}</b>)!",
+        parse_mode="HTML",
+    )
+
+
 # ---------- HANDLERS ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await maybe_warn_cookie_expiration(update)
 
     raw_text = update.message.text or update.message.caption or ""
 
-    shopee_match = re.search(SHOPEE_URL_PATTERN, raw_text)
+    shopee_links = re.findall(SHOPEE_URL_PATTERN, raw_text)
     ml_match = re.search(ML_URL_PATTERN, raw_text)
 
-    # Se não houver nenhum link, avisa e sai
-    if not shopee_match and not ml_match:
+    if not shopee_links and not ml_match:
         await update.message.reply_text(
-            "👋 Nenhum link válido da Shopee ou do Mercado Livre foi encontrado na mensagem."
+            "👋 Nenhum link válido da Shopee ou do Mercado Livre foi encontrado na mensagem.\n"
+            "💡 Dica: Use /gerar para adicionar 15 ofertas automáticas da Shopee na fila!"
         )
         return
 
-    cleaned_text = clean_corrupted_text(raw_text)
+    cleaned_text = remove_affiliate_disclaimers(clean_corrupted_text(raw_text))
 
-    # Detecta múltiplos links do Mercado Livre (apenas se houver match e não for Shopee)
-    if ml_match and not shopee_match:
-        # Encontra todos os links do ML na mensagem
+    if ml_match and not shopee_links:
         all_ml_links = re.findall(ML_URL_PATTERN, raw_text)
-        # Remove pontuação final de cada link (mantendo a URL limpa)
         all_ml_links = [re.sub(r"[.,;:!?)\n]+$", "", link) for link in all_ml_links]
         if len(all_ml_links) > 1:
             context.user_data["ml_links"] = all_ml_links
@@ -893,10 +835,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         context.user_data["multiple_ml"] = False
 
-    # Define plataforma e URL principal (apenas para fluxo único)
-    if shopee_match:
+    if shopee_links:
         context.user_data["platform"] = "shopee"
-        context.user_data["raw_url"] = shopee_match.group(0).rstrip(".,;:!?)\n")
+        context.user_data["shopee_links"] = [
+            l.rstrip(".,;:!?)\n") for l in shopee_links
+        ]
+        context.user_data["raw_url"] = context.user_data["shopee_links"][-1]
     else:
         context.user_data["platform"] = "mercadolivre"
         context.user_data["raw_url"] = ml_match.group(0).rstrip(".,;:!?)\n")
@@ -916,13 +860,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        f"⚙️ *Link do {platform_name} identificado!*\n\n"
+        f"⚙️ <b>Link do {platform_name} identificado!</b>\n\n"
         "Qual o tipo de mensagem que você deseja formatar?\n\n"
-        "• *CUPOM:* Mantém o texto idêntico e converte o link do cupom.\n"
-        "• *OFERTA:* Mantém o texto idêntico e converte o link da oferta.\n"
-        "• *LINK:* Gera uma nova cópia completa via API/Plataforma.",
+        "• <b>CUPOM:</b> Mantém o texto idêntico e converte o link do cupom.\n"
+        "• <b>OFERTA:</b> Mantém o texto idêntico e converte o link da oferta.\n"
+        "• <b>LINK:</b> Gera uma nova cópia completa via API/Plataforma.",
         reply_markup=keyboard,
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 
@@ -945,14 +889,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("⏳ Gerando seu link de afiliado...")
     clean_base_text = remove_affiliate_disclaimers(raw_text)
 
-    image_url = None
+    media_url = None
     aff_link = None
     formatted_msg = ""
 
     # ================= MERCADO LIVRE =================
     if platform == "mercadolivre":
-        # --- PROCESSAMENTO MÚLTIPLO (link por link) ---
-        if multiple_ml:
+        if choice == "type_cupom":
+            aff_link = ML_DEFAULT_CUPON_LINK
+
+            if clean_base_text.strip() == raw_url.strip():
+                formatted_msg = (
+                    "🎟️ <b>CUPOM DE DESCONTO</b>\n\n"
+                    f"Resgate o seu cupom no link abaixo:\n👉 {aff_link}"
+                )
+            else:
+                formatted_msg = escape_html(clean_base_text).replace(
+                    escape_html(raw_url), aff_link
+                )
+
+        elif multiple_ml:
             ml_links = context.user_data.get("ml_links", [])
             if not ml_links:
                 await query.message.reply_text(
@@ -960,107 +916,104 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # Processa cada link individualmente e coleta os resultados
-            aff_links = []  # lista para guardar os links de afiliado na mesma ordem
+            aff_links = []
             for original_link in ml_links:
-                # Chama a conversão individual (usa a fila e o lock)
                 result = await enqueue_ml_conversion(original_link)
                 if result and result.get("affiliate_url"):
                     aff_links.append(result["affiliate_url"])
                 else:
-                    # Se falhar, mantém o link original (fallback)
-                    logger.warning(f"⚠️ Falha ao converter link: {original_link}")
-                    aff_links.append(original_link)  # fallback
+                    aff_links.append(original_link)
 
-            # Agora substitui cada link original pelo novo link (na ordem)
-            new_text = clean_base_text
+            new_text = escape_html(clean_base_text)
             for original, new in zip(ml_links, aff_links):
-                new_text = new_text.replace(original, new)
+                new_text = new_text.replace(escape_html(original), new)
 
-            # Adiciona aviso de frete grátis se não existir
             free_notice = (
-                "\n\n🚚 *Aproveite o frete grátis e benefícios do Mercado Livre!*"
+                "\n\n🚚 <b>Aproveite o frete grátis e benefícios do Mercado Livre!</b>"
             )
             if "frete grátis" not in new_text.lower():
                 new_text += free_notice
-
             formatted_msg = clean_corrupted_text(new_text)
 
-            # Envia a mensagem sem imagem
-            encoded_text = urllib.parse.quote(formatted_msg, safe="")
-            encoded_text = encoded_text.replace("%25", "%2525")
-            whatsapp_url = f"https://wa.me/?text={encoded_text}"
+            context.user_data["last_formatted_msg"] = formatted_msg
+            context.user_data["last_media_url"] = None
+            context.user_data["last_store"] = "Mercado Livre"
+            context.user_data["last_product_url"] = raw_url
+
             keyboard = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "📲 Compartilhar no WhatsApp", url=whatsapp_url
+                            "📥 Adicionar à Fila do Portal",
+                            callback_data="send_group_queue",
                         )
-                    ]
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Enviar para Grupo Principal",
+                            callback_data="send_group_principal",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🤝 Enviar para Grupo Parceria",
+                            callback_data="send_group_parceria",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "📢 Enviar para Todos os Grupos",
+                            callback_data="send_group_all",
+                        )
+                    ],
                 ]
             )
             await query.message.reply_text(
-                formatted_msg, reply_markup=keyboard, parse_mode="Markdown"
-            )
-            return  # finaliza aqui
-
-        # --- PROCESSAMENTO ÚNICO (fluxo existente) ---
-        ml_result = await enqueue_ml_conversion(raw_url)
-        if not ml_result:
-            await query.message.reply_text(
-                "❌ Não foi possível gerar o link de afiliado do Mercado Livre. Verifique se a sessão de login está válida."
+                formatted_msg, reply_markup=keyboard, parse_mode="HTML"
             )
             return
 
-        title = ml_result.get("title")
-        current_price = ml_result.get("current_price")
-        original_price = ml_result.get("original_price")
-        aff_link = ml_result.get("affiliate_url")
-        image_url = ml_result.get("image_url")
-        rating = ml_result.get("rating")
-        reviews_count = ml_result.get("reviews_count")
-        sales = ml_result.get("sales")
+        else:
+            ml_result = await enqueue_ml_conversion(raw_url)
 
-        free_shipping_notice = (
-            "🚚 *Aproveite o frete grátis e benefícios do Mercado Livre!*"
-        )
-        price_line = format_ml_price_line(current_price, original_price)
+            if not ml_result:
+                await query.message.reply_text(
+                    "❌ Não foi possível gerar o link de afiliado do Mercado Livre. Verifique se a sessão de login está válida."
+                )
+                return
 
-        # Monta a linha de confiança (apenas se houver dados)
-        trust_line = ""
-        if rating is not None:
-            trust_line += f"⭐ *{rating:.1f}*"
-            if reviews_count is not None:
-                trust_line += f" ({reviews_count} avaliações)"
-            trust_line += "\n"
-        if sales is not None:
-            trust_line += f"📦 *{sales:,}* unidades vendidas\n"
-        if trust_line:
-            trust_line += "\n"
+            title = escape_html(ml_result.get("title", ""))
+            current_price = ml_result.get("current_price")
+            original_price = ml_result.get("original_price")
+            aff_link = ml_result.get("affiliate_url")
+            media_url = ml_result.get("image_url")
+            rating = ml_result.get("rating")
+            reviews_count = ml_result.get("reviews_count")
+            sales = ml_result.get("sales")
 
-        seller_line = "🏪 Loja: *Mercado Livre*\n\n"
-
-        # Formatação conforme escolha do usuário
-        if choice == "type_link":
-            header_title = (
-                f"🔥 *{title}*\n\n"
-                if title
-                else "🔥 *PRODUTO EM DESTAQUE NO MERCADO LIVRE*\n\n"
+            free_shipping_notice = (
+                "🚚 <b>Aproveite o frete grátis e benefícios do Mercado Livre!</b>"
             )
-            formatted_msg = (
-                f"{header_title}"
-                f"{price_line}"
-                f"{trust_line}"
-                f"{seller_line}"
-                f"{free_shipping_notice}\n\n"
-                f"👇 *Clique no link abaixo para garantir o seu:*\n👉 {aff_link}"
-            )
-        else:  # type_cupom ou type_oferta
-            if clean_base_text.strip() == raw_url.strip():
+            price_line = format_ml_price_line(current_price, original_price)
+
+            trust_line = ""
+            if rating is not None:
+                trust_line += f"⭐ <b>{rating:.1f}</b>"
+                if reviews_count is not None:
+                    trust_line += f" ({reviews_count} avaliações)"
+                trust_line += "\n"
+            if sales is not None:
+                trust_line += f"📦 <b>{sales:,}</b> unidades vendidas\n"
+            if trust_line:
+                trust_line += "\n"
+
+            seller_line = "🏪 Loja: <b>Mercado Livre</b>\n\n"
+
+            if choice == "type_link":
                 header_title = (
-                    f"🔥 *{title}*\n\n"
+                    f"🔥 <b>{title}</b>\n\n"
                     if title
-                    else "🏷️ *PROMOÇÃO IMPERDÍVEL MERCADO LIVRE*\n\n"
+                    else "🔥 <b>PRODUTO EM DESTAQUE NO MERCADO LIVRE</b>\n\n"
                 )
                 formatted_msg = (
                     f"{header_title}"
@@ -1068,11 +1021,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{trust_line}"
                     f"{seller_line}"
                     f"{free_shipping_notice}\n\n"
-                    f"👇 *Aproveite no link abaixo:*\n👉 {aff_link}"
+                    f"👇 <b>Clique no link abaixo para garantir o seu:</b>\n👉 {aff_link}"
                 )
             else:
-                converted_text = clean_base_text.replace(raw_url, aff_link)
-                formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
+                if clean_base_text.strip() == raw_url.strip():
+                    header_title = (
+                        f"🔥 <b>{title}</b>\n\n"
+                        if title
+                        else "🏷 <b>PROMOÇÃO IMPERDÍVEL MERCADO LIVRE</b>\n\n"
+                    )
+                    formatted_msg = (
+                        f"{header_title}"
+                        f"{price_line}"
+                        f"{trust_line}"
+                        f"{seller_line}"
+                        f"{free_shipping_notice}\n\n"
+                        f"👇 <b>Aproveite no link abaixo:</b>\n👉 {aff_link}"
+                    )
+                else:
+                    converted_text = escape_html(clean_base_text).replace(
+                        escape_html(raw_url), aff_link
+                    )
+                    formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
 
     # ================= SHOPEE =================
     else:
@@ -1086,90 +1056,246 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         api = ShopeeAffiliateAPI(app_id, app_secret)
-        full_url = resolve_short_link(raw_url)
 
-        item_id = extract_item_id(full_url) or extract_item_id(raw_url)
-        offer = api.get_product_offer(item_id) if item_id else None
+        shopee_links = context.user_data.get("shopee_links", [raw_url])
+
+        offer = None
+        product_link = raw_url
+
+        for link in shopee_links:
+            full_url = resolve_short_link(link)
+            item_id = extract_item_id(full_url) or extract_item_id(link)
+            if item_id:
+                temp_offer = api.get_product_offer(item_id)
+                if temp_offer and temp_offer.get("imageUrl"):
+                    offer = temp_offer
+                    product_link = link
+                    break
+
         image_url = offer.get("imageUrl") if offer else None
+        media_url = image_url
 
         if choice == "type_cupom":
-            aff_link = api.generate_short_link(raw_url) or api.generate_short_link(
-                full_url
+            aff_link = api.generate_short_link(product_link) or api.generate_short_link(
+                resolve_short_link(product_link)
             )
             if not aff_link:
                 await query.message.reply_text("❌ Erro ao converter o link de cupom.")
                 return
 
             if clean_base_text.strip() == raw_url.strip():
-                formatted_msg = f"🎟️ CUPOM DE DESCONTO SHOPEE\n\nResgate o seu cupom no link abaixo:\n👉 {aff_link}"
+                formatted_msg = (
+                    "🎟 <b>CUPOM DE DESCONTO SHOPEE</b>\n\n"
+                    f"Resgate o seu cupom no link abaixo:\n👉 {aff_link}"
+                )
             else:
-                formatted_msg = clean_base_text.replace(raw_url, aff_link)
+                formatted_msg = escape_html(clean_base_text).replace(
+                    escape_html(raw_url), aff_link
+                )
 
         elif choice == "type_oferta":
-            aff_link = api.generate_short_link(full_url) or api.generate_short_link(
-                raw_url
-            )
+            full_prod_url = resolve_short_link(product_link)
+            aff_link = api.generate_short_link(
+                full_prod_url
+            ) or api.generate_short_link(product_link)
             if not aff_link:
                 await query.message.reply_text("❌ Erro ao converter o link de oferta.")
                 return
 
-            free_shipping_notice = "🚚 *Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!*"
+            free_shipping_notice = "🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>"
 
             if clean_base_text.strip() == raw_url.strip():
-                formatted_msg = f"🏷️ OFERTA IMPERDÍVEL SHOPEE\n\n{free_shipping_notice}\n\nAproveite a promoção no link abaixo:\n👉 {aff_link}"
+                formatted_msg = (
+                    "🏷 <b>OFERTA IMPERDÍVEL SHOPEE</b>\n\n"
+                    f"{free_shipping_notice}\n\n"
+                    f"Aproveite a promoção no link abaixo:\n👉 {aff_link}"
+                )
             else:
-                converted_text = clean_base_text.replace(raw_url, aff_link)
+                converted_text = escape_html(clean_base_text)
+                for slink in shopee_links:
+                    converted_text = converted_text.replace(
+                        escape_html(slink), aff_link
+                    )
                 formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
 
         elif choice == "type_link":
             if offer:
-                aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
+                aff_link = offer.get("offerLink") or api.generate_short_link(
+                    resolve_short_link(product_link)
+                )
                 formatted_msg = format_product_message(offer, aff_link)
             else:
-                aff_link = api.generate_short_link(full_url) or api.generate_short_link(
-                    raw_url
-                )
+                full_prod_url = resolve_short_link(product_link)
+                aff_link = api.generate_short_link(
+                    full_prod_url
+                ) or api.generate_short_link(product_link)
                 formatted_msg = (
-                    f"🔥 PRODUTO EM DESTAQUE NA SHOPEE\n\n"
-                    f"🏪 Loja: *Shopee*\n\n"
-                    f"🚚 *Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!*\n\n"
+                    "🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n"
+                    "🏪 Loja: <b>Shopee</b>\n\n"
+                    "🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>\n\n"
                     f"Confira as melhores condições de compra no link:\n👉 {aff_link}"
                 )
 
-    # --- MONTAGEM DA URL DO WHATSAPP E ENVIO (comum a ambos) ---
+    # --- MONTAGEM DOS BOTÕES E ENVIO ---
     formatted_msg = clean_corrupted_text(formatted_msg)
-    encoded_text = urllib.parse.quote(formatted_msg, safe="")
-    encoded_text = encoded_text.replace("%25", "%2525")
-    whatsapp_share_url = f"https://wa.me/?text={encoded_text}"
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📲 Compartilhar no WhatsApp", url=whatsapp_share_url)]]
+    context.user_data["last_formatted_msg"] = formatted_msg
+    context.user_data["last_media_url"] = media_url
+    context.user_data["last_store"] = (
+        "Shopee" if platform == "shopee" else "Mercado Livre"
+    )
+    context.user_data["last_product_url"] = (
+        product_link if platform == "shopee" else raw_url
     )
 
-    if image_url:
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📥 Adicionar à Fila do Portal",
+                    callback_data="send_group_queue",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🚀 Enviar para Grupo Principal",
+                    callback_data="send_group_principal",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🤝 Enviar para Grupo Parceria",
+                    callback_data="send_group_parceria",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📢 Enviar para Todos os Grupos", callback_data="send_group_all"
+                )
+            ],
+        ]
+    )
+
+    if media_url:
         try:
             await query.message.reply_photo(
-                photo=image_url,
+                photo=media_url,
                 caption=formatted_msg,
                 reply_markup=keyboard,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             return
         except Exception as e:
             logger.error(f"Erro ao enviar foto: {e}")
 
     await query.message.reply_text(
-        formatted_msg, reply_markup=keyboard, parse_mode="Markdown"
+        formatted_msg, reply_markup=keyboard, parse_mode="HTML"
     )
 
 
+# ---------- HANDLER DE DISPARO PARA OS GRUPOS OU FILA ----------
+async def handle_whatsapp_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    message_text = context.user_data.get("last_formatted_msg")
+    media_url = context.user_data.get("last_media_url")
+    choice = query.data
+
+    if not message_text:
+        await query.message.reply_text("⚠️ Nenhuma mensagem pronta encontrada.")
+        return
+
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if choice == "send_group_queue":
+        store_name = context.user_data.get("last_store", "Shopee")
+        prod_url = context.user_data.get("last_product_url", "")
+        today_str = datetime.now(cuiaba_tz).strftime("%Y-%m-%d")
+
+        add_to_queue(
+            store=store_name,
+            product_url=prod_url,
+            message=message_text,
+            media_url=media_url,
+            priority=0,
+            target_date=today_str,
+        )
+        await query.message.reply_text(
+            f"📥 <b>Adicionado com sucesso à Fila do Portal</b> para hoje (<b>{today_str}</b>)!",
+            parse_mode="HTML",
+        )
+        return
+
+    if choice == "send_group_principal":
+        status_msg = await query.message.reply_text(
+            "⏳ Enviando para o Grupo Principal..."
+        )
+        success = await send_whatsapp_offer(
+            WHATSAPP_GROUP_PRINCIPAL,
+            message_text,
+            media_url,
+        )
+
+        if success:
+            await status_msg.edit_text(
+                "✅ Oferta disparada com sucesso para o Grupo Principal!"
+            )
+        else:
+            await status_msg.edit_text(
+                "❌ Falha ao disparar para o Grupo Principal. Verifique os logs."
+            )
+
+    elif choice == "send_group_parceria":
+        status_msg = await query.message.reply_text(
+            "⏳ Enviando para o Grupo Parceria..."
+        )
+        success = await send_whatsapp_offer(
+            WHATSAPP_GROUP_PARCERIA,
+            message_text,
+            media_url,
+        )
+
+        if success:
+            await status_msg.edit_text(
+                "✅ Oferta disparada com sucesso para o Grupo Parceria!"
+            )
+        else:
+            await status_msg.edit_text(
+                "❌ Falha ao disparar para o Grupo Parceria. Verifique os logs."
+            )
+
+    elif choice == "send_group_all":
+        status_msg = await query.message.reply_text(
+            "⏳ Enviando para todos os grupos..."
+        )
+
+        success_principal = await send_whatsapp_offer(
+            WHATSAPP_GROUP_PRINCIPAL,
+            message_text,
+            media_url,
+        )
+        success_parceria = await send_whatsapp_offer(
+            WHATSAPP_GROUP_PARCERIA,
+            message_text,
+            media_url,
+        )
+
+        if success_principal and success_parceria:
+            await status_msg.edit_text(
+                "✅ Oferta disparada com sucesso para todos os grupos!"
+            )
+        else:
+            await status_msg.edit_text(
+                "⚠️ Disparo concluído, mas um dos grupos falhou. Verifique os logs."
+            )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler global — captura qualquer exceção não tratada nos handlers acima."""
     logger.error(
         "Exceção não tratada durante o processamento de um update:",
         exc_info=context.error,
     )
-
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text(
@@ -1179,12 +1305,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
 
 
-# ---------- CICLO DE VIDA DO BROWSER (startup/shutdown) ----------
+# ---------- CICLO DE VIDA DO BROWSER ----------
 async def on_startup(app: Application) -> None:
     load_ml_cookies()
-
-    headless = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
-
+    headless = False
     ml_state.playwright = await async_playwright().start()
     ml_state.browser = await ml_state.playwright.chromium.launch(
         headless=headless,
@@ -1203,14 +1327,26 @@ async def on_startup(app: Application) -> None:
 async def on_shutdown(app: Application) -> None:
     if ml_state.worker_task:
         ml_state.worker_task.cancel()
+        try:
+            await ml_state.worker_task
+        except asyncio.CancelledError:
+            pass
+
     if ml_state.browser:
-        await ml_state.browser.close()
+        try:
+            await ml_state.browser.close()
+        except Exception:
+            pass
+
     if ml_state.playwright:
-        await ml_state.playwright.stop()
+        try:
+            await ml_state.playwright.stop()
+        except Exception:
+            pass
+
     logger.info("🛑 Browser do Mercado Livre encerrado.")
 
 
-# ---------- MAIN ----------
 def main():
     app = (
         Application.builder()
@@ -1220,26 +1356,18 @@ def main():
         .build()
     )
 
+    app.add_handler(CommandHandler(["gerar", "auto"], handle_gerar_command))
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message
         )
     )
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(CallbackQueryHandler(handle_callback, pattern="^type_"))
+    app.add_handler(
+        CallbackQueryHandler(handle_whatsapp_dispatch, pattern="^send_group_")
+    )
     app.add_error_handler(error_handler)
-
-    hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
-    if hostname:
-        port = int(os.environ.get("PORT", 10000))
-        logger.info(f"🚀 Iniciando Webhook na porta: {port}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=TOKEN,
-            webhook_url=f"https://{hostname}/{TOKEN}",
-        )
-    else:
-        app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
