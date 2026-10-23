@@ -156,12 +156,16 @@ async def send_whatsapp_offer(
     group_id: str,
     message: str,
     media_url: str | None = None,
+    media_type: str = "image",
 ) -> bool:
     if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
         logger.error("❌ Credenciais da Evolution API não configuradas.")
         return False
 
     final_message = convert_html_to_whatsapp(message)
+
+    # Se a URL for .mp4 ou o media_type for 'video', envia como vídeo
+    is_video = (media_type == "video") or (media_url and ".mp4" in media_url.lower())
 
     try:
         loop = asyncio.get_running_loop()
@@ -171,25 +175,43 @@ async def send_whatsapp_offer(
 
             if media_url:
                 try:
-                    media_resp = requests.get(media_url, timeout=20)
+                    dl_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    }
+                    media_resp = requests.get(media_url, headers=dl_headers, timeout=30)
                     if media_resp.status_code == 200:
                         url_api = f"{EVOLUTION_API_URL}/message/sendMedia/{EVOLUTION_INSTANCE}"
-                        files = {
-                            "file": (
-                                "oferta_qualidade.jpg",
-                                media_resp.content,
-                                "image/jpeg",
-                            )
-                        }
-                        data = {
-                            "number": group_id,
-                            "mediatype": "image",
-                            "caption": final_message,
-                            "fileName": "oferta_qualidade.jpg",
-                        }
+                        if is_video:
+                            files = {
+                                "file": (
+                                    "oferta_video.mp4",
+                                    media_resp.content,
+                                    "video/mp4",
+                                )
+                            }
+                            data = {
+                                "number": group_id,
+                                "mediatype": "video",
+                                "caption": final_message,
+                                "fileName": "oferta_video.mp4",
+                            }
+                        else:
+                            files = {
+                                "file": (
+                                    "oferta_qualidade.jpg",
+                                    media_resp.content,
+                                    "image/jpeg",
+                                )
+                            }
+                            data = {
+                                "number": group_id,
+                                "mediatype": "image",
+                                "caption": final_message,
+                                "fileName": "oferta_qualidade.jpg",
+                            }
 
                         res = requests.post(
-                            url_api, data=data, files=files, headers=headers, timeout=40
+                            url_api, data=data, files=files, headers=headers, timeout=60
                         )
                         if res.status_code in [200, 201]:
                             return res
@@ -207,7 +229,9 @@ async def send_whatsapp_offer(
 
         response = await loop.run_in_executor(None, _request)
         if response.status_code in [200, 201]:
-            logger.info(f"✅ Oferta enviada com sucesso para o WhatsApp ({group_id})")
+            logger.info(
+                f"✅ Oferta ({'VÍDEO' if is_video else 'IMAGEM'}) enviada com sucesso para o WhatsApp ({group_id})"
+            )
             return True
         else:
             logger.error(f"❌ Erro ao enviar para o WhatsApp: {response.text}")

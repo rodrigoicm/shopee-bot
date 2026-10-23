@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Form, Query
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 import sqlite3
 import os
 import requests
@@ -26,6 +26,21 @@ WHATSAPP_GROUP_PARCERIA = os.environ.get(
 )
 
 
+def ensure_media_type_column():
+    """Garante que a coluna media_type exista na tabela queue do SQLite."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("ALTER TABLE queue ADD COLUMN media_type TEXT DEFAULT 'image'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    conn.close()
+
+
+ensure_media_type_column()
+
+
 def convert_html_to_whatsapp(text: str) -> str:
     if not text:
         return ""
@@ -38,7 +53,10 @@ def convert_html_to_whatsapp(text: str) -> str:
 
 
 def trigger_whatsapp_dispatch(
-    target_group: str, message: str, media_url: str | None = None
+    target_group: str,
+    message: str,
+    media_url: str | None = None,
+    media_type: str = "image",
 ) -> bool:
     if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
         return False
@@ -47,20 +65,33 @@ def trigger_whatsapp_dispatch(
         headers = {"apikey": EVOLUTION_API_KEY}
         if media_url:
             try:
-                media_resp = requests.get(media_url, timeout=15)
+                media_resp = requests.get(media_url, timeout=25)
                 if media_resp.status_code == 200:
                     url_api = (
                         f"{EVOLUTION_API_URL}/message/sendMedia/{EVOLUTION_INSTANCE}"
                     )
-                    files = {"file": ("oferta.jpg", media_resp.content, "image/jpeg")}
-                    data = {
-                        "number": target_group,
-                        "mediatype": "image",
-                        "caption": final_message,
-                        "fileName": "oferta.jpg",
-                    }
+                    if media_type == "video":
+                        files = {
+                            "file": ("oferta.mp4", media_resp.content, "video/mp4")
+                        }
+                        data = {
+                            "number": target_group,
+                            "mediatype": "video",
+                            "caption": final_message,
+                            "fileName": "oferta.mp4",
+                        }
+                    else:
+                        files = {
+                            "file": ("oferta.jpg", media_resp.content, "image/jpeg")
+                        }
+                        data = {
+                            "number": target_group,
+                            "mediatype": "image",
+                            "caption": final_message,
+                            "fileName": "oferta.jpg",
+                        }
                     res = requests.post(
-                        url_api, data=data, files=files, headers=headers, timeout=30
+                        url_api, data=data, files=files, headers=headers, timeout=45
                     )
                     if res.status_code in [200, 201]:
                         return True
@@ -99,13 +130,61 @@ def refresh_offer_data(product_url: str) -> tuple[str, str | None]:
         return msg, None
 
 
+@app.post("/validate-video")
+async def validate_video(product_url: str = Form(...)):
+    """Testa e valida a extração do vídeo (.mp4) da Shopee sem salvar na fila."""
+    app_id = os.environ.get("SHOPEE_APP_ID", "")
+    app_secret = os.environ.get("SHOPEE_APP_SECRET", "")
+    api = ShopeeAffiliateAPI(app_id, app_secret)
+
+    # Expande link curto antes de mandar para o Playwright
+    full_url = api.resolve_short_link(product_url)
+
+    try:
+        from bot import ml_state
+
+        if not ml_state.browser:
+            return JSONResponse(
+                {
+                    "success": False,
+                    "message": "❌ O Browser do Playwright não está ativo. Rode pelo app_runner.py!",
+                }
+            )
+
+        vid_url = await api.extract_shopee_video_fast(ml_state.browser, full_url)
+        if vid_url:
+            return JSONResponse(
+                {
+                    "success": True,
+                    "video_url": vid_url,
+                    "resolved_url": full_url,
+                    "message": "✅ Vídeo (.mp4) encontrado e validado com sucesso!",
+                }
+            )
+        else:
+            return JSONResponse(
+                {
+                    "success": False,
+                    "resolved_url": full_url,
+                    "message": "⚠️ Nenhum vídeo (.mp4) foi detectado antes do bloqueio/login (ou o anúncio não possui vídeo). Você ainda pode colar o link direto do vídeo no campo ao lado ou salvar apenas com foto.",
+                }
+            )
+    except Exception as e:
+        return JSONResponse(
+            {"success": False, "message": f"❌ Erro ao validar vídeo: {e}"}
+        )
+
+
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request, selected_date: str = Query(None)):
+async def dashboard(
+    request: Request,
+    selected_date: str = Query(None),
+    video_msg: str = Query(None),
+):
     cuiaba_tz = timezone(timedelta(hours=-4))
     now_dt = datetime.now(cuiaba_tz)
     today_str = now_dt.strftime("%Y-%m-%d")
 
-    # Se nenhuma data foi passada na URL, usa o dia corrente como padrão
     current_date = selected_date if selected_date else today_str
 
     conn = sqlite3.connect(DB_NAME)
@@ -114,14 +193,12 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
     cursor.execute("SELECT key, value FROM config")
     configs = {row[0]: row[1] for row in cursor.fetchall()}
 
-    # Busca ofertas filtradas pela data selecionada no calendário
     cursor.execute(
-        "SELECT id, store, product_url, formatted_message, media_url, status, priority, target_date, created_at FROM queue WHERE target_date = ? ORDER BY priority DESC, id DESC",
+        "SELECT id, store, product_url, formatted_message, media_url, status, priority, target_date, created_at, COALESCE(media_type, 'image') FROM queue WHERE target_date = ? ORDER BY priority DESC, id DESC",
         (current_date,),
     )
     queue_items = cursor.fetchall()
 
-    # Busca todas as ofertas de outras datas para a opção de "Importar"
     cursor.execute(
         "SELECT id, store, product_url, target_date FROM queue WHERE target_date != ? GROUP BY product_url ORDER BY id DESC",
         (current_date,),
@@ -163,6 +240,12 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
     elif pending_offers > 0 and current_date == today_str:
         timer_status_text = "Pronto para iniciar (< 30s)"
 
+    alert_html = ""
+    if video_msg == "ok":
+        alert_html = '<div class="alert alert-success">🎬 Oferta salva com <b>VÍDEO (.mp4)</b> com sucesso! Clique em "👁️ Ver" na tabela para assistir.</div>'
+    elif video_msg == "fallback":
+        alert_html = '<div class="alert alert-warning">⚠️ Não foi possível extrair o vídeo automaticamente; a oferta foi salva usando a <b>Imagem</b> padrão da API.</div>'
+
     html_content = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -174,6 +257,7 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
     <body class="bg-light">
         <div class="container py-5">
             <h1 class="mb-4">🚀 Painel de Controle de Ofertas (Cuiabá MT -04:00)</h1>
+            {alert_html}
 
             <!-- Totalizadores e Cronômetro -->
             <div class="row g-3 mb-4">
@@ -212,24 +296,40 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
                 </div>
             </div>
 
-            <!-- Seção de Parâmetros -->
+<!-- Seção de Parâmetros -->
             <div class="card mb-4 shadow-sm">
-                <div class="card-header bg-primary text-white">⚙️ Parâmetros de Envio</div>
+                <div class="card-header bg-primary text-white">⚙️ Parâmetros de Envio & Auto-Abastecimento</div>
                 <div class="card-body">
                     <form action="/update-config" method="POST" class="row g-3">
-                        <div class="col-md-3">
+                        <div class="col-md-2">
                             <label class="form-label">Início dos Envios</label>
                             <input type="time" name="start_time" value="{configs.get('start_time', '08:00')}" class="form-control" required>
                         </div>
-                        <div class="col-md-3">
+                        <div class="col-md-2">
                             <label class="form-label">Fim dos Envios</label>
                             <input type="time" name="end_time" value="{configs.get('end_time', '22:00')}" class="form-control" required>
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label">Intervalo (Minutos)</label>
+                        <div class="col-md-2">
+                            <label class="form-label">Intervalo (Min)</label>
                             <input type="number" name="interval_minutes" value="{configs.get('interval_minutes', '30')}" class="form-control" required>
                         </div>
-                        <div class="col-md-3 d-flex align-items-end">
+                        <div class="col-md-2">
+                            <label class="form-label">Qtd. por Lote Auto</label>
+                            <input type="number" name="auto_refill_count" value="{configs.get('auto_refill_count', '15')}" class="form-control" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Palavras-Chave (Mais Vendidos - Opcional)</label>
+                            <input type="text" name="auto_keywords" value="{configs.get('auto_keywords', '')}" placeholder="Ex: cozinha, ferramentas, fone" class="form-control">
+                        </div>
+                        <div class="col-md-8 d-flex align-items-center">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" name="auto_refill_enabled" value="1" id="autoRefillSwitch" {"checked" if configs.get('auto_refill_enabled', '1') == '1' else ""}>
+                                <label class="form-check-label fw-bold" for="autoRefillSwitch">
+                                    🔄 Auto-Abastecer Fila quando esvaziar (Mescla TOP_PERFORMING + Mais Vendidos automaticamente)
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
                             <button type="submit" class="btn btn-success w-100">Salvar Parâmetros</button>
                         </div>
                     </form>
@@ -254,12 +354,12 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
 
             <!-- Seção de Geração Automática via API Shopee -->
             <div class="card mb-4 shadow-sm border-success">
-                <div class="card-header bg-success text-white">🤖 Gerar Lista Automática da Shopee (TOP_PERFORMING)</div>
+                <div class="card-header bg-success text-white">🤖 Gerar Lista Automática da Shopee (Mescla TOP_PERFORMING + Mais Vendidos)</div>
                 <div class="card-body">
                     <form action="/generate-auto-offers" method="POST" class="row g-3">
                         <input type="hidden" name="target_date" value="{current_date}">
                         <div class="col-md-12">
-                            <button type="submit" class="btn btn-success w-100">🎲 Gerar 15 Ofertas Aleatórias para {current_date}</button>
+                            <button type="submit" class="btn btn-success w-100">🎲 Gerar {configs.get('auto_refill_count', '15')} Ofertas (TOP_PERFORMING + Mais Vendidos) para {current_date}</button>
                         </div>
                     </form>
                 </div>
@@ -269,14 +369,40 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
             <div class="card mb-4 shadow-sm">
                 <div class="card-header bg-dark text-white">➕ Cadastrar Nova Oferta para {current_date}</div>
                 <div class="card-body">
-                    <form action="/add-offer" method="POST" class="row g-3">
+                    <form action="/add-offer" method="POST" class="row g-3" id="addOfferForm">
                         <input type="hidden" name="target_date" value="{current_date}">
                         <div class="col-md-12">
                             <label class="form-label">Cole o Link do Produto da Shopee</label>
-                            <input type="url" name="product_url" placeholder="https://s.shopee.com.br/..." class="form-control" required>
+                            <input type="url" name="product_url" id="productUrlInput" placeholder="https://s.shopee.com.br/..." class="form-control" required>
                         </div>
-                        <div class="col-md-12">
-                            <button type="submit" class="btn btn-primary">Converter e Salvar para {current_date}</button>
+                        <div class="col-md-6 d-flex align-items-center">
+                            <div class="form-check">
+                                <!-- DESMARCADO POR PADRÃO -->
+                                <input class="form-check-input" type="checkbox" name="extract_video" value="1" id="extractVideoCheck">
+                                <label class="form-check-label fw-bold" for="extractVideoCheck">
+                                    🎬 Tentar extrair vídeo (.mp4) automaticamente
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <input type="url" name="manual_video_url" id="manualVideoInput" placeholder="Ou cole o Link Direto do Vídeo (.mp4) Opcional" class="form-control">
+                        </div>
+
+                        <!-- Área de Resultado da Validação de Vídeo Ao Vivo -->
+                        <div class="col-md-12" id="videoValidationBox" style="display: none;">
+                            <div class="p-3 border rounded bg-white">
+                                <div id="videoValidationStatus" class="mb-2 fw-bold"></div>
+                                <video id="videoPreviewPlayer" class="rounded" style="max-height: 280px; display: none;" controls></video>
+                            </div>
+                        </div>
+
+                        <div class="col-md-12 d-flex gap-2">
+                            <button type="button" class="btn btn-outline-secondary" id="btnValidateVideo" onclick="validateShopeeVideo()">
+                                🔍 Testar / Validar Vídeo Antes de Salvar
+                            </button>
+                            <button type="submit" class="btn btn-primary flex-grow-1">
+                                Converter e Salvar para {current_date}
+                            </button>
                         </div>
                     </form>
                 </div>
@@ -338,6 +464,7 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
             priority,
             t_date,
             created_at,
+            media_type,
         ) = item
         badge_status = (
             f"<span class='badge bg-warning'>Pendente</span>"
@@ -349,11 +476,25 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
             if priority == 1
             else f"<span class='badge bg-secondary'>Auto</span>"
         )
+        badge_media = (
+            " <span class='badge bg-info text-dark'>🎬 Vídeo</span>"
+            if media_type == "video"
+            else ""
+        )
+
+        if media_type == "video" and media_url:
+            media_preview_html = f"<video src='{media_url}' class='img-fluid mb-3 rounded w-100' controls></video>"
+        elif media_url:
+            media_preview_html = (
+                f"<img src='{media_url}' class='img-fluid mb-3 rounded' alt='Foto'>"
+            )
+        else:
+            media_preview_html = ""
 
         html_content += f"""
                             <tr>
                                 <td>{item_id}</td>
-                                <td>{store}</td>
+                                <td>{store}{badge_media}</td>
                                 <td><a href="{prod_url}" target="_blank" class="text-truncate d-inline-block" style="max-width: 130px;">{prod_url}</a></td>
                                 <td>
                                     <button class="btn btn-sm btn-outline-info mb-1" data-bs-toggle="modal" data-bs-target="#modalMsg{item_id}">👁️ Ver</button>
@@ -384,7 +525,7 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
                                             <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                                           </div>
                                           <div class="modal-body">
-                                            {f"<img src='{media_url}' class='img-fluid mb-3 rounded' alt='Foto'>" if media_url else ""}
+                                            {media_preview_html}
                                             <div class="p-3 bg-light border rounded" style="white-space: pre-wrap;">{formatted_msg}</div>
                                           </div>
                                         </div>
@@ -404,8 +545,45 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
             </div>
         </div>
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
         <script>
+            async function validateShopeeVideo() {{
+                const urlInput = document.getElementById('productUrlInput');
+                const box = document.getElementById('videoValidationBox');
+                const statusEl = document.getElementById('videoValidationStatus');
+                const player = document.getElementById('videoPreviewPlayer');
+                const manualInput = document.getElementById('manualVideoInput');
+                const check = document.getElementById('extractVideoCheck');
+
+                if (!urlInput.value) {{
+                    alert('Cole o link do produto da Shopee primeiro!');
+                    return;
+                }}
+
+                box.style.display = 'block';
+                player.style.display = 'none';
+                statusEl.innerHTML = '⏳ Abrindo página no Playwright e buscando vídeo (.mp4) antes do login... aguarde até 12s.';
+
+                const formData = new FormData();
+                formData.append('product_url', urlInput.value);
+
+                try {{
+                    const resp = await fetch('/validate-video', {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await resp.json();
+                    statusEl.innerHTML = data.message;
+                    if (data.success && data.video_url) {{
+                        player.src = data.video_url;
+                        player.style.display = 'block';
+                        manualInput.value = data.video_url;
+                        check.checked = true;
+                    }}
+                }} catch (err) {{
+                    statusEl.innerHTML = '❌ Erro na requisição de validação: ' + err;
+                }}
+            }}
+
             let secondsLeft = {remaining_seconds};
             const timerEl = document.getElementById('countdown-timer');
 
@@ -419,7 +597,6 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
                 timerEl.textContent = String(mins).padStart(2, '0') + ":" + String(secs).padStart(2, '0');
                 secondsLeft--;
 
-                // Quando o cronômetro zerar, atualiza a página para puxar o novo status
                 if (secondsLeft === 0) {{
                     setTimeout(() => window.location.reload(), 1000);
                 }}
@@ -430,15 +607,17 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
                 setInterval(updateCountdown, 1000);
             }}
 
-            // Atualização de segurança: Se houver itens pendentes, verifica a cada 30 segundos se o status mudou
             const pendingCount = {pending_offers};
             if (pendingCount > 0) {{
                 setInterval(() => {{
-                    // Evita dar reload se o usuário estiver digitando em algum campo
-                    if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {{
+                    if (
+                        document.activeElement.tagName !== 'INPUT' &&
+                        document.activeElement.tagName !== 'SELECT' &&
+                        document.getElementById('videoValidationBox').style.display === 'none'
+                    ) {{
                         window.location.reload();
                     }}
-                }}, 30000); // A cada 30 segundos atualiza a página suavemente
+                }}, 30000);
             }}
         </script>
     </body>
@@ -448,7 +627,7 @@ async def dashboard(request: Request, selected_date: str = Query(None)):
 
 
 @app.post("/generate-auto-offers")
-async def generate_auto_offers(target_date: str = Form(...), count: int = Form(15)):
+async def generate_auto_offers(target_date: str = Form(...)):
     app_id = os.environ.get("SHOPEE_APP_ID")
     app_secret = os.environ.get("SHOPEE_APP_SECRET")
     if not app_id or not app_secret:
@@ -456,9 +635,12 @@ async def generate_auto_offers(target_date: str = Form(...), count: int = Form(1
             url=f"/?selected_date={target_date}&gen_count=0", status_code=303
         )
 
+    count = int(get_config("auto_refill_count") or "15")
+    keywords_csv = get_config("auto_keywords") or ""
+
     api = ShopeeAffiliateAPI(app_id, app_secret)
     added_count = api.generate_auto_offers_to_queue(
-        count=count, target_date=target_date
+        count=count, target_date=target_date, keywords_csv=keywords_csv
     )
     return RedirectResponse(
         url=f"/?selected_date={target_date}&gen_count={added_count}", status_code=303
@@ -470,10 +652,16 @@ async def update_parameters(
     start_time: str = Form(...),
     end_time: str = Form(...),
     interval_minutes: str = Form(...),
+    auto_refill_count: str = Form("15"),
+    auto_keywords: str = Form(""),
+    auto_refill_enabled: str = Form(None),
 ):
     update_config("start_time", start_time)
     update_config("end_time", end_time)
     update_config("interval_minutes", interval_minutes)
+    update_config("auto_refill_count", auto_refill_count)
+    update_config("auto_keywords", auto_keywords.strip())
+    update_config("auto_refill_enabled", "1" if auto_refill_enabled == "1" else "0")
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -488,15 +676,18 @@ async def send_now(offer_id: int, target: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT store, product_url, formatted_message, media_url FROM queue WHERE id = ?",
+        "SELECT store, product_url, formatted_message, media_url, COALESCE(media_type, 'image') FROM queue WHERE id = ?",
         (offer_id,),
     )
     row = cursor.fetchone()
 
     if row:
-        store, product_url, saved_msg, saved_media = row
+        store, product_url, saved_msg, saved_media, media_type = row
         if store.lower() == "shopee" and product_url:
-            formatted_message, media_url = refresh_offer_data(product_url)
+            formatted_message, fresh_image = refresh_offer_data(product_url)
+            media_url = (
+                saved_media if media_type == "video" and saved_media else fresh_image
+            )
             cursor.execute(
                 "UPDATE queue SET formatted_message = ?, media_url = ? WHERE id = ?",
                 (formatted_message, media_url, offer_id),
@@ -508,20 +699,20 @@ async def send_now(offer_id: int, target: str):
         success = False
         if target == "all":
             s1 = trigger_whatsapp_dispatch(
-                WHATSAPP_GROUP_PRINCIPAL, formatted_message, media_url
+                WHATSAPP_GROUP_PRINCIPAL, formatted_message, media_url, media_type
             )
             time.sleep(1)
             s2 = trigger_whatsapp_dispatch(
-                WHATSAPP_GROUP_PARCERIA, formatted_message, media_url
+                WHATSAPP_GROUP_PARCERIA, formatted_message, media_url, media_type
             )
             success = s1 or s2
         elif target == "principal":
             success = trigger_whatsapp_dispatch(
-                WHATSAPP_GROUP_PRINCIPAL, formatted_message, media_url
+                WHATSAPP_GROUP_PRINCIPAL, formatted_message, media_url, media_type
             )
         elif target == "parceria":
             success = trigger_whatsapp_dispatch(
-                WHATSAPP_GROUP_PARCERIA, formatted_message, media_url
+                WHATSAPP_GROUP_PARCERIA, formatted_message, media_url, media_type
             )
 
         if success:
@@ -532,7 +723,12 @@ async def send_now(offer_id: int, target: str):
 
 
 @app.post("/add-offer")
-async def add_offer(product_url: str = Form(...), target_date: str = Form(...)):
+async def add_offer(
+    product_url: str = Form(...),
+    target_date: str = Form(...),
+    extract_video: str = Form(None),
+    manual_video_url: str = Form(None),
+):
     app_id = os.environ.get("SHOPEE_APP_ID")
     app_secret = os.environ.get("SHOPEE_APP_SECRET")
 
@@ -551,26 +747,66 @@ async def add_offer(product_url: str = Form(...), target_date: str = Form(...)):
     full_url = api.resolve_short_link(product_url)
     item_id = api.extract_item_id(full_url) or api.extract_item_id(product_url)
 
+    video_url_found = None
+    video_status_param = ""
+
+    if manual_video_url and manual_video_url.strip().startswith("http"):
+        video_url_found = manual_video_url.strip()
+        video_status_param = "&video_msg=ok"
+    elif extract_video == "1":
+        try:
+            from bot import ml_state
+
+            if ml_state.browser:
+                video_url_found = await api.extract_shopee_video_fast(
+                    ml_state.browser, full_url
+                )
+        except Exception:
+            video_url_found = None
+
+        video_status_param = (
+            "&video_msg=ok" if video_url_found else "&video_msg=fallback"
+        )
+
     offer = api.get_product_offer(item_id) if item_id else None
 
     if offer:
         aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
         msg = api.format_product_message(offer, aff_link)
-        media_url = offer.get("imageUrl")
+        media_url = video_url_found if video_url_found else offer.get("imageUrl")
     else:
         aff_link = api.generate_short_link(full_url) or product_url
         msg = f"🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n🏪 Loja: <b>Shopee</b>\n\n🚚 <b>Aproveite os cupons de FRETE GRÁTIS!</b>\n\n👉 {aff_link}"
-        media_url = None
+        media_url = video_url_found
 
-    add_to_queue(
-        store="Shopee",
-        product_url=product_url,
-        message=msg,
-        media_url=media_url,
-        priority=1,
-        target_date=target_date,
+    media_type = "video" if video_url_found else "image"
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cuiaba_tz = timezone(timedelta(hours=-4))
+    now_cuiaba = datetime.now(cuiaba_tz).strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO queue (store, product_url, formatted_message, media_url, media_type, priority, status, target_date, scheduled_at, created_at)
+        VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)
+        """,
+        (
+            "Shopee",
+            product_url,
+            msg,
+            media_url,
+            media_type,
+            target_date,
+            now_cuiaba,
+            now_cuiaba,
+        ),
     )
-    return RedirectResponse(url=f"/?selected_date={target_date}", status_code=303)
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(
+        url=f"/?selected_date={target_date}{video_status_param}", status_code=303
+    )
 
 
 @app.post("/import-offer")

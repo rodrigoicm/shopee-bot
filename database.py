@@ -23,6 +23,7 @@ def init_db():
             product_url TEXT,
             formatted_message TEXT,
             media_url TEXT,
+            media_type TEXT DEFAULT 'image', -- NOVO: 'image' ou 'video'
             priority INTEGER DEFAULT 0,
             status TEXT DEFAULT 'pending',
             target_date TEXT,
@@ -32,7 +33,7 @@ def init_db():
     """)
 
     try:
-        cursor.execute("ALTER TABLE queue ADD COLUMN target_date TEXT")
+        cursor.execute("ALTER TABLE queue ADD COLUMN media_type TEXT DEFAULT 'image'")
         conn.commit()
     except sqlite3.OperationalError:
         pass
@@ -42,6 +43,9 @@ def init_db():
         "end_time": "22:00",
         "interval_minutes": "30",
         "is_active": "1",
+        "auto_refill_enabled": "1",  # 1 = Ativado (Opção A: abastece quando a fila zera)
+        "auto_refill_count": "15",  # Quantidade gerada automaticamente por lote
+        "auto_keywords": "",  # Palavras-chave opcionais separadas por vírgula
     }
 
     for key, val in default_configs.items():
@@ -113,6 +117,7 @@ def add_to_queue(
     product_url: str,
     message: str,
     media_url: str = None,
+    media_type: str = "image",
     priority: int = 0,
     target_date: str = None,
 ):
@@ -124,14 +129,15 @@ def add_to_queue(
 
     cursor.execute(
         """
-        INSERT INTO queue (store, product_url, formatted_message, media_url, priority, status, target_date, scheduled_at, created_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        INSERT INTO queue (store, product_url, formatted_message, media_url, media_type, priority, status, target_date, scheduled_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
     """,
         (
             store,
             product_url,
             message,
             media_url,
+            media_type,
             priority,
             target_date,
             now_cuiaba,
@@ -147,7 +153,7 @@ def get_next_pending_offer(target_date: str):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, store, product_url, formatted_message, media_url, priority
+        SELECT id, store, product_url, formatted_message, media_url, priority, COALESCE(media_type, 'image')
         FROM queue
         WHERE status = 'pending' AND target_date = ?
         ORDER BY priority DESC, id ASC
