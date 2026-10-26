@@ -8,6 +8,7 @@ import logging
 import asyncio
 import sys
 import requests
+import ml_offer
 from typing import List
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone, timedelta
@@ -317,314 +318,19 @@ def resolve_short_link(short_url: str) -> str:
         return short_url
 
 
-def format_price(value: float) -> str:
-    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def format_ml_price_line(
-    current_price: float | None, original_price: float | None
-) -> str:
-    if not current_price:
-        return ""
-    if original_price and original_price > current_price:
-        return (
-            f"💰 <b>Preço:</b> de {format_price(original_price)} "
-            f"por <b>{format_price(current_price)}</b>\n\n"
-        )
-    return f"💰 <b>Preço:</b> <b>{format_price(current_price)}</b>\n\n"
-
-
-async def resolve_product_url(page, url: str) -> str | None:
-    try:
-        await page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        await asyncio.sleep(2.5)
-
-        target_href = await page.evaluate("""() => {
-            const linkEl = document.querySelector('a.poly-component__link, a[class*="poly-component__link"]');
-            if (linkEl && linkEl.href) {
-                return linkEl.href;
-            }
-
-            const allLinks = Array.from(document.querySelectorAll('a'));
-            const found = allLinks.find(el => el.innerText && (el.innerText.includes('Ir para produto') || el.innerText.includes('Ir para o produto')));
-            if (found && found.href) {
-                return found.href;
-            }
-
-            return null;
-        }""")
-
-        if target_href:
-            resolved = target_href.split("?")[0].split("#")[0]
-            return resolved
-
-        return page.url.split("?")[0].split("#")[0]
-
-    except Exception as e:
-        logger.error(f"Erro ao resolver URL {url}: {e}")
-        return None
-
-
-# ---------- PLAYWRIGHT: MERCADO LIVRE AFILIADOS ----------
+# ---------- CONVERSÃO DE LINK DO MERCADO LIVRE (VIA ML_OFFER) ----------
 async def convert_mercadolivre_link(product_url: str) -> dict | None:
-    if ml_state.browser is None or ml_state.cookies_dict is None:
-        logger.error("❌ Browser ou cookies do Mercado Livre não inicializados.")
+    """Converte o link do Mercado Livre usando o novo motor leve e retorna todos os campos do ml_offer."""
+    try:
+        offer = await ml_offer.get_ml_offer(product_url)
+        if not offer:
+            if ml_offer.last_error:
+                logger.error(f"❌ Erro no ml_offer: {ml_offer.last_error}")
+            return None
+        return offer
+    except Exception as e:
+        logger.error(f"❌ Exceção ao converter link do Mercado Livre no bot: {e}")
         return None
-
-    async with ml_state.lock:
-        ml_url_match = re.search(ML_URL_PATTERN, product_url)
-        clean_url = (
-            ml_url_match.group(0).rstrip(".,;:!?)\n ")
-            if ml_url_match
-            else product_url.strip()
-        )
-
-        context = None
-        try:
-            context = await ml_state.browser.new_context(
-                storage_state=ml_state.cookies_dict,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                viewport={"width": 1366, "height": 768},
-                permissions=["clipboard-read", "clipboard-write"],
-            )
-            page = await context.new_page()
-
-            product_url_final = await resolve_product_url(page, clean_url)
-            if not product_url_final:
-                return None
-
-            product_info = await page.evaluate(r"""() => {
-                let title = "";
-                const h1 = document.querySelector('h1.ui-pdp-title, h1.poly-component__title, .ui-pdp-header__title-container h1, h1');
-                if (h1 && h1.innerText) {
-                    title = h1.innerText.trim();
-                } else {
-                    const ogTitle = document.querySelector('meta[property="og:title"]');
-                    if (ogTitle && ogTitle.content) title = ogTitle.content.trim();
-                }
-
-                let imageUrl = null;
-                const ogImage = document.querySelector('meta[property="og:image"]');
-                if (ogImage && ogImage.content) {
-                    imageUrl = ogImage.content;
-                } else {
-                    const img = document.querySelector('img.ui-pdp-image, img[data-zoom]');
-                    if (img) imageUrl = img.src;
-                }
-
-                function parseAndesAmount(el) {
-                    if (!el) return null;
-                    const fractionEl = el.querySelector('.andes-money-amount__fraction');
-                    if (!fractionEl) return null;
-                    const centsEl = el.querySelector('.andes-money-amount__cents');
-                    const fraction = fractionEl.innerText.replace(/\D/g, '');
-                    const cents = centsEl ? centsEl.innerText.replace(/\D/g, '') : '00';
-                    const val = parseFloat(fraction + '.' + cents);
-                    return isNaN(val) ? null : val;
-                }
-
-                let originalPrice = null;
-                let currentPrice = null;
-
-                const origEl = document.querySelector(
-                    '.ui-pdp-price__original-value .andes-money-amount, ' +
-                    's.ui-pdp-price__part .andes-money-amount, ' +
-                    '.andes-money-amount--previous, ' +
-                    's .andes-money-amount, ' +
-                    'del .andes-money-amount'
-                );
-                if (origEl) originalPrice = parseAndesAmount(origEl);
-
-                const currEl = document.querySelector(
-                    '.ui-pdp-price__second-line .andes-money-amount, ' +
-                    '.ui-pdp-price__part--medium .andes-money-amount, ' +
-                    '.ui-pdp-price__price .andes-money-amount, ' +
-                    '.ui-pdp-price .andes-money-amount:not(.andes-money-amount--previous), ' +
-                    '.andes-money-amount:not(.andes-money-amount--previous)'
-                );
-                if (currEl) currentPrice = parseAndesAmount(currEl);
-
-                if (!currentPrice) {
-                    const metaPrice = document.querySelector('meta[property="product:price:amount"]');
-                    if (metaPrice && metaPrice.content) {
-                        const p = parseFloat(metaPrice.content);
-                        if (!isNaN(p)) currentPrice = p;
-                    }
-                }
-
-                let rating = null;
-                let reviewsCount = null;
-                const ratingSelectors = [
-                    '.ui-review-capability__rating__average',
-                    '.ui-review-capability__rating__average--desktop',
-                    '.ui-pdp-reviews__rating .ui-pdp-review__rating',
-                    '.poly-reviews__rating .poly-reviews__rating__average',
-                    '.andes-pagination__button .ui-pdp-review__rating',
-                    '.ui-pdp-review__rating--value'
-                ];
-                for (const sel of ratingSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        const text = el.innerText.trim().replace(',', '.');
-                        const match = text.match(/^([\d.]+)/);
-                        if (match) {
-                            rating = parseFloat(match[1]);
-                            break;
-                        }
-                    }
-                }
-
-                const reviewsSelectors = [
-                    '.ui-review-capability__rating__label',
-                    '.ui-pdp-reviews__amount',
-                    '.poly-reviews__total',
-                    '.ui-pdp-review__amount'
-                ];
-                for (const sel of reviewsSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        const digits = el.innerText.trim().replace(/\D/g, '');
-                        if (digits) {
-                            reviewsCount = parseInt(digits, 10);
-                            break;
-                        }
-                    }
-                }
-
-                let sales = null;
-                const salesSelectors = [
-                    '.ui-pdp-sold-stats__quantity',
-                    '.ui-pdp-subtitle__sold',
-                    '.poly-component__sold',
-                    '.ui-pdp-sold-stats__quantity span'
-                ];
-                for (const sel of salesSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        const digits = el.innerText.trim().replace(/\D/g, '');
-                        if (digits) {
-                            sales = parseInt(digits, 10);
-                            break;
-                        }
-                    }
-                }
-
-                return {
-                    title: title || null,
-                    image_url: imageUrl || null,
-                    current_price: currentPrice,
-                    original_price: originalPrice,
-                    rating: rating || null,
-                    reviews_count: reviewsCount || null,
-                    sales: sales || null
-                };
-            }""")
-
-            await page.goto(
-                "https://www.mercadolivre.com.br/afiliados/linkbuilder",
-                timeout=25000,
-                wait_until="domcontentloaded",
-            )
-            await asyncio.sleep(2.0)
-
-            if "login" in page.url or "navigation" in page.url:
-                logger.error("❌ Sessão expirada! Redirecionado para login.")
-                return None
-
-            reset_btn = (
-                page.locator("main button")
-                .filter(has_text=re.compile(r"Criar outro|Gerar outro|Limpar", re.I))
-                .first
-            )
-            if await reset_btn.is_visible(timeout=2000):
-                await reset_btn.click()
-                await asyncio.sleep(1.0)
-
-            input_selector = "textarea[name*='link'], textarea[id*='link'], textarea.andes-form-control__field, input[placeholder*='http'], textarea[placeholder*='http']"
-            input_el = page.locator(input_selector).first
-            if not await input_el.is_visible(timeout=5000):
-                input_selector = "main textarea, main input[type='text']"
-                input_el = page.locator(input_selector).first
-            await input_el.wait_for(state="visible", timeout=10000)
-
-            await input_el.click()
-            await asyncio.sleep(0.5)
-            await page.evaluate(
-                "(text) => navigator.clipboard.writeText(text)", product_url_final
-            )
-            modifier = "Meta" if sys.platform == "darwin" else "Control"
-            await page.keyboard.press(f"{modifier}+v")
-            await asyncio.sleep(1.5)
-            await page.dispatch_event(input_selector, "input")
-            await page.dispatch_event(input_selector, "change")
-            await page.keyboard.press("Tab")
-            await asyncio.sleep(2.0)
-
-            btn = (
-                page.locator("main button")
-                .filter(has_text=re.compile(r"^Gerar$", re.I))
-                .first
-            )
-            try:
-                await page.wait_for_selector(
-                    "main button:not([disabled])", timeout=10000
-                )
-            except Exception:
-                pass
-            await btn.click()
-            await asyncio.sleep(2.5)
-
-            copy_btn = (
-                page.locator("main button")
-                .filter(has_text=re.compile(r"Copiar", re.I))
-                .first
-            )
-            try:
-                await copy_btn.wait_for(state="visible", timeout=10000)
-            except Exception:
-                await asyncio.sleep(2.0)
-
-            affiliate_url = await page.evaluate(r"""() => {
-                const inputs = Array.from(document.querySelectorAll('main input, main textarea, input, textarea'));
-                for (const input of inputs) {
-                    if (input.value && (input.value.includes('meli.la') || input.value.includes('mercadolivre.com.br/sec/'))) {
-                        return input.value;
-                    }
-                }
-                const bodyText = document.body.innerText;
-                const match = bodyText.match(/https?:\/\/(?:meli\.la|www\.mercadolivre\.com\.br\/sec\/)[^\s"']+/);
-                if (match) return match[0];
-                return null;
-            }""")
-
-            if affiliate_url and "http" in affiliate_url:
-                return {
-                    "affiliate_url": affiliate_url.strip(),
-                    "image_url": (
-                        product_info.get("image_url") if product_info else None
-                    ),
-                    "title": product_info.get("title") if product_info else None,
-                    "current_price": (
-                        product_info.get("current_price") if product_info else None
-                    ),
-                    "original_price": (
-                        product_info.get("original_price") if product_info else None
-                    ),
-                    "rating": product_info.get("rating") if product_info else None,
-                    "reviews_count": (
-                        product_info.get("reviews_count") if product_info else None
-                    ),
-                    "sales": product_info.get("sales") if product_info else None,
-                }
-
-            return None
-
-        except Exception as e:
-            logger.error(f"❌ Erro ao converter link do Mercado Livre: {e}")
-            return None
-        finally:
-            if context is not None:
-                await context.close()
 
 
 async def ml_worker() -> None:
@@ -1006,62 +712,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            title = escape_html(ml_result.get("title", ""))
-            current_price = ml_result.get("current_price")
-            original_price = ml_result.get("original_price")
             aff_link = ml_result.get("affiliate_url")
             media_url = ml_result.get("image_url")
-            rating = ml_result.get("rating")
-            reviews_count = ml_result.get("reviews_count")
-            sales = ml_result.get("sales")
-
-            free_shipping_notice = (
-                "🚚 <b>Aproveite o frete grátis e benefícios do Mercado Livre!</b>"
-            )
-            price_line = format_ml_price_line(current_price, original_price)
-
-            trust_line = ""
-            if rating is not None:
-                trust_line += f"⭐ <b>{rating:.1f}</b>"
-                if reviews_count is not None:
-                    trust_line += f" ({reviews_count} avaliações)"
-                trust_line += "\n"
-            if sales is not None:
-                trust_line += f"📦 <b>{sales:,}</b> unidades vendidas\n"
-            if trust_line:
-                trust_line += "\n"
-
-            seller_line = "🏪 Loja: <b>Mercado Livre</b>\n\n"
 
             if choice == "type_link":
-                header_title = (
-                    f"🔥 <b>{title}</b>\n\n"
-                    if title
-                    else "🔥 <b>PRODUTO EM DESTAQUE NO MERCADO LIVRE</b>\n\n"
-                )
-                formatted_msg = (
-                    f"{header_title}"
-                    f"{price_line}"
-                    f"{trust_line}"
-                    f"{seller_line}"
-                    f"{free_shipping_notice}\n\n"
-                    f"👇 <b>Clique no link abaixo para garantir o seu:</b>\n👉 {aff_link}"
-                )
+                # UMA ÚNICA LINHA, IGUAL À SHOPEE:
+                formatted_msg = ml_offer.format_product_message(ml_result, aff_link)
             else:
+                free_shipping_notice = (
+                    "🚚 <b>Aproveite o frete grátis e benefícios do Mercado Livre!</b>"
+                )
                 if clean_base_text.strip() == raw_url.strip():
-                    header_title = (
-                        f"🔥 <b>{title}</b>\n\n"
-                        if title
-                        else "🏷 <b>PROMOÇÃO IMPERDÍVEL MERCADO LIVRE</b>\n\n"
-                    )
-                    formatted_msg = (
-                        f"{header_title}"
-                        f"{price_line}"
-                        f"{trust_line}"
-                        f"{seller_line}"
-                        f"{free_shipping_notice}\n\n"
-                        f"👇 <b>Aproveite no link abaixo:</b>\n👉 {aff_link}"
-                    )
+                    formatted_msg = ml_offer.format_product_message(ml_result, aff_link)
                 else:
                     converted_text = escape_html(clean_base_text).replace(
                         escape_html(raw_url), aff_link

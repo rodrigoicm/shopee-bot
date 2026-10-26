@@ -4,12 +4,18 @@ import sqlite3
 import os
 import requests
 import time
+import logging
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from database import DB_NAME, get_config, update_config, add_to_queue, delete_offer
+import asyncio
+import ml_offer
 from shopee_service import ShopeeAffiliateAPI
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Portal de Automação de Ofertas")
 
@@ -108,7 +114,17 @@ def trigger_whatsapp_dispatch(
 
 
 def refresh_offer_data(product_url: str) -> tuple[str, str | None]:
-    """Reconsulta a API da Shopee na hora do envio para atualizar preço, título e link."""
+    """Reconsulta a API/Serviço na hora do envio para atualizar preço, título e link."""
+    if "mercadolivre" in product_url.lower() or "meli.la" in product_url.lower():
+        try:
+            offer = ml_offer._build_offer_sync(product_url)
+            if offer and offer.get("affiliate_url"):
+                msg = ml_offer.format_product_message(offer)
+                return msg, offer.get("image_url")
+        except Exception as e:
+            logger.warning(f"Erro ao atualizar oferta do ML no portal: {e}")
+        return f"🔥 Oferta imperdível:\n👉 {product_url}", None
+
     app_id = os.environ.get("SHOPEE_APP_ID")
     app_secret = os.environ.get("SHOPEE_APP_SECRET")
     if not app_id or not app_secret:
@@ -137,7 +153,6 @@ async def validate_video(product_url: str = Form(...)):
     app_secret = os.environ.get("SHOPEE_APP_SECRET", "")
     api = ShopeeAffiliateAPI(app_id, app_secret)
 
-    # Expande link curto antes de mandar para o Playwright
     full_url = api.resolve_short_link(product_url)
 
     try:
@@ -207,7 +222,6 @@ async def dashboard(
 
     conn.close()
 
-    # --- CÁLCULO DOS TOTALIZADORES E DO TIMER ---
     total_offers = len(queue_items)
     sent_offers = sum(1 for item in queue_items if item[5] == "sent")
     pending_offers = sum(1 for item in queue_items if item[5] == "pending")
@@ -259,7 +273,6 @@ async def dashboard(
             <h1 class="mb-4">🚀 Painel de Controle de Ofertas (Cuiabá MT -04:00)</h1>
             {alert_html}
 
-            <!-- Totalizadores e Cronômetro -->
             <div class="row g-3 mb-4">
                 <div class="col-md-3">
                     <div class="card text-center shadow-sm border-primary h-100">
@@ -296,7 +309,6 @@ async def dashboard(
                 </div>
             </div>
 
-<!-- Seção de Parâmetros -->
             <div class="card mb-4 shadow-sm">
                 <div class="card-header bg-primary text-white">⚙️ Parâmetros de Envio & Auto-Abastecimento</div>
                 <div class="card-body">
@@ -336,7 +348,6 @@ async def dashboard(
                 </div>
             </div>
 
-            <!-- Seção do Calendário / Seletor de Data -->
             <div class="card mb-4 shadow-sm border-info">
                 <div class="card-header bg-info text-white">📅 Calendário de Ofertas (Data Selecionada: {current_date})</div>
                 <div class="card-body">
@@ -352,7 +363,6 @@ async def dashboard(
                 </div>
             </div>
 
-            <!-- Seção de Geração Automática via API Shopee -->
             <div class="card mb-4 shadow-sm border-success">
                 <div class="card-header bg-success text-white">🤖 Gerar Lista Automática da Shopee (Mescla TOP_PERFORMING + Mais Vendidos)</div>
                 <div class="card-body">
@@ -365,22 +375,20 @@ async def dashboard(
                 </div>
             </div>
 
-            <!-- Seção de Cadastro para a Data Selecionada -->
             <div class="card mb-4 shadow-sm">
                 <div class="card-header bg-dark text-white">➕ Cadastrar Nova Oferta para {current_date}</div>
                 <div class="card-body">
                     <form action="/add-offer" method="POST" class="row g-3" id="addOfferForm">
                         <input type="hidden" name="target_date" value="{current_date}">
                         <div class="col-md-12">
-                            <label class="form-label">Cole o Link do Produto da Shopee</label>
-                            <input type="url" name="product_url" id="productUrlInput" placeholder="https://s.shopee.com.br/..." class="form-control" required>
+                            <label class="form-label">Cole o Link do Produto (Shopee ou Mercado Livre)</label>
+                            <input type="url" name="product_url" id="productUrlInput" placeholder="https://..." class="form-control" required>
                         </div>
                         <div class="col-md-6 d-flex align-items-center">
                             <div class="form-check">
-                                <!-- DESMARCADO POR PADRÃO -->
                                 <input class="form-check-input" type="checkbox" name="extract_video" value="1" id="extractVideoCheck">
                                 <label class="form-check-label fw-bold" for="extractVideoCheck">
-                                    🎬 Tentar extrair vídeo (.mp4) automaticamente
+                                    🎬 Tentar extrair vídeo (.mp4) automaticamente (Shopee)
                                 </label>
                             </div>
                         </div>
@@ -388,7 +396,6 @@ async def dashboard(
                             <input type="url" name="manual_video_url" id="manualVideoInput" placeholder="Ou cole o Link Direto do Vídeo (.mp4) Opcional" class="form-control">
                         </div>
 
-                        <!-- Área de Resultado da Validação de Vídeo Ao Vivo -->
                         <div class="col-md-12" id="videoValidationBox" style="display: none;">
                             <div class="p-3 border rounded bg-white">
                                 <div id="videoValidationStatus" class="mb-2 fw-bold"></div>
@@ -408,7 +415,6 @@ async def dashboard(
                 </div>
             </div>
 
-            <!-- Seção de Importar de Outra Data -->
             <div class="card mb-4 shadow-sm">
                 <div class="card-header bg-secondary text-white">📥 Importar Oferta de Outra Data para {current_date}</div>
                 <div class="card-body">
@@ -434,7 +440,6 @@ async def dashboard(
                 </div>
             </div>
 
-            <!-- Seção da Fila do Dia -->
             <div class="card shadow-sm">
                 <div class="card-header bg-secondary text-white">📋 Fila de Ofertas para o dia {current_date}</div>
                 <div class="card-body">
@@ -516,7 +521,6 @@ async def dashboard(
                                         <button type="submit" class="btn btn-sm btn-danger mb-1">🗑️</button>
                                     </form>
 
-                                    <!-- Modal de Pré-visualização -->
                                     <div class="modal fade" id="modalMsg{item_id}" tabindex="-1">
                                       <div class="modal-dialog">
                                         <div class="modal-content">
@@ -555,13 +559,13 @@ async def dashboard(
                 const check = document.getElementById('extractVideoCheck');
 
                 if (!urlInput.value) {{
-                    alert('Cole o link do produto da Shopee primeiro!');
+                    alert('Cole o link do produto primeiro!');
                     return;
                 }}
 
                 box.style.display = 'block';
                 player.style.display = 'none';
-                statusEl.innerHTML = '⏳ Abrindo página no Playwright e buscando vídeo (.mp4) antes do login... aguarde até 12s.';
+                statusEl.innerHTML = '⏳ Validando e buscando vídeo... aguarde.';
 
                 const formData = new FormData();
                 formData.append('product_url', urlInput.value);
@@ -580,7 +584,7 @@ async def dashboard(
                         check.checked = true;
                     }}
                 }} catch (err) {{
-                    statusEl.innerHTML = '❌ Erro na requisição de validação: ' + err;
+                    statusEl.innerHTML = '❌ Erro na requisição: ' + err;
                 }}
             }}
 
@@ -605,19 +609,6 @@ async def dashboard(
             if (secondsLeft > 0) {{
                 updateCountdown();
                 setInterval(updateCountdown, 1000);
-            }}
-
-            const pendingCount = {pending_offers};
-            if (pendingCount > 0) {{
-                setInterval(() => {{
-                    if (
-                        document.activeElement.tagName !== 'INPUT' &&
-                        document.activeElement.tagName !== 'SELECT' &&
-                        document.getElementById('videoValidationBox').style.display === 'none'
-                    ) {{
-                        window.location.reload();
-                    }}
-                }}, 30000);
             }}
         </script>
     </body>
@@ -729,57 +720,75 @@ async def add_offer(
     extract_video: str = Form(None),
     manual_video_url: str = Form(None),
 ):
-    app_id = os.environ.get("SHOPEE_APP_ID")
-    app_secret = os.environ.get("SHOPEE_APP_SECRET")
+    is_ml = "mercadolivre" in product_url.lower() or "meli.la" in product_url.lower()
 
-    api = ShopeeAffiliateAPI(app_id, app_secret) if app_id and app_secret else None
-
-    if not api:
-        add_to_queue(
-            store="Shopee",
-            product_url=product_url,
-            message=f"🔥 Oferta imperdível:\n👉 {product_url}",
-            priority=1,
-            target_date=target_date,
-        )
-        return RedirectResponse(url=f"/?selected_date={target_date}", status_code=303)
-
-    full_url = api.resolve_short_link(product_url)
-    item_id = api.extract_item_id(full_url) or api.extract_item_id(product_url)
-
-    video_url_found = None
-    video_status_param = ""
-
-    if manual_video_url and manual_video_url.strip().startswith("http"):
-        video_url_found = manual_video_url.strip()
-        video_status_param = "&video_msg=ok"
-    elif extract_video == "1":
-        try:
-            from bot import ml_state
-
-            if ml_state.browser:
-                video_url_found = await api.extract_shopee_video_fast(
-                    ml_state.browser, full_url
-                )
-        except Exception:
-            video_url_found = None
-
-        video_status_param = (
-            "&video_msg=ok" if video_url_found else "&video_msg=fallback"
-        )
-
-    offer = api.get_product_offer(item_id) if item_id else None
-
-    if offer:
-        aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
-        msg = api.format_product_message(offer, aff_link)
-        media_url = video_url_found if video_url_found else offer.get("imageUrl")
+    if is_ml:
+        offer = await ml_offer.get_ml_offer(product_url)
+        if offer and offer.get("affiliate_url"):
+            msg = ml_offer.format_product_message(offer)
+            media_url = offer.get("image_url")
+        else:
+            msg = f"🔥 Oferta do Mercado Livre:\n👉 {product_url}"
+            media_url = None
+        store_name = "Mercado Livre"
     else:
-        aff_link = api.generate_short_link(full_url) or product_url
-        msg = f"🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n🏪 Loja: <b>Shopee</b>\n\n🚚 <b>Aproveite os cupons de FRETE GRÁTIS!</b>\n\n👉 {aff_link}"
-        media_url = video_url_found
+        app_id = os.environ.get("SHOPEE_APP_ID")
+        app_secret = os.environ.get("SHOPEE_APP_SECRET")
 
-    media_type = "video" if video_url_found else "image"
+        api = ShopeeAffiliateAPI(app_id, app_secret) if app_id and app_secret else None
+
+        if not api:
+            add_to_queue(
+                store="Shopee",
+                product_url=product_url,
+                message=f"🔥 Oferta imperdível:\n👉 {product_url}",
+                priority=1,
+                target_date=target_date,
+            )
+            return RedirectResponse(
+                url=f"/?selected_date={target_date}", status_code=303
+            )
+
+        full_url = api.resolve_short_link(product_url)
+        item_id = api.extract_item_id(full_url) or api.extract_item_id(product_url)
+
+        video_url_found = None
+        video_status_param = ""
+
+        if manual_video_url and manual_video_url.strip().startswith("http"):
+            video_url_found = manual_video_url.strip()
+            video_status_param = "&video_msg=ok"
+        elif extract_video == "1":
+            try:
+                from bot import ml_state
+
+                if ml_state.browser:
+                    video_url_found = await api.extract_shopee_video_fast(
+                        ml_state.browser, full_url
+                    )
+            except Exception:
+                video_url_found = None
+
+            video_status_param = (
+                "&video_msg=ok" if video_url_found else "&video_msg=fallback"
+            )
+
+        offer = api.get_product_offer(item_id) if item_id else None
+
+        if offer:
+            aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
+            msg = api.format_product_message(offer, aff_link)
+            media_url = video_url_found if video_url_found else offer.get("imageUrl")
+        else:
+            aff_link = api.generate_short_link(full_url) or product_url
+            msg = f"🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n🏪 Loja: <b>Shopee</b>\n\n🚚 <b>Aproveite os cupons de FRETE GRÁTIS!</b>\n\n👉 {aff_link}"
+            media_url = video_url_found
+
+        store_name = "Shopee"
+
+    media_type = (
+        "video" if ("video_url_found" in locals() and video_url_found) else "image"
+    )
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -791,7 +800,7 @@ async def add_offer(
         VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)
         """,
         (
-            "Shopee",
+            store_name,
             product_url,
             msg,
             media_url,
@@ -804,35 +813,49 @@ async def add_offer(
     conn.commit()
     conn.close()
 
+    status_param = video_status_param if "video_status_param" in locals() else ""
     return RedirectResponse(
-        url=f"/?selected_date={target_date}{video_status_param}", status_code=303
+        url=f"/?selected_date={target_date}{status_param}", status_code=303
     )
 
 
 @app.post("/import-offer")
 async def import_offer(product_url: str = Form(...), target_date: str = Form(...)):
-    app_id = os.environ.get("SHOPEE_APP_ID")
-    app_secret = os.environ.get("SHOPEE_APP_SECRET")
+    is_ml = "mercadolivre" in product_url.lower() or "meli.la" in product_url.lower()
 
-    api = ShopeeAffiliateAPI(app_id, app_secret) if app_id and app_secret else None
-    if api:
-        full_url = api.resolve_short_link(product_url)
-        item_id = api.extract_item_id(full_url) or api.extract_item_id(product_url)
-        offer = api.get_product_offer(item_id) if item_id else None
-        if offer:
-            aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
-            msg = api.format_product_message(offer, aff_link)
-            media_url = offer.get("imageUrl")
+    if is_ml:
+        offer = await ml_offer.get_ml_offer(product_url)
+        if offer and offer.get("affiliate_url"):
+            msg = ml_offer.format_product_message(offer)
+            media_url = offer.get("image_url")
         else:
-            aff_link = api.generate_short_link(full_url) or product_url
-            msg = f"🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n👉 {aff_link}"
+            msg = f"🔥 Oferta do Mercado Livre:\n👉 {product_url}"
             media_url = None
+        store_name = "Mercado Livre"
     else:
-        msg = f"🔥 Oferta importada:\n👉 {product_url}"
-        media_url = None
+        app_id = os.environ.get("SHOPEE_APP_ID")
+        app_secret = os.environ.get("SHOPEE_APP_SECRET")
+
+        api = ShopeeAffiliateAPI(app_id, app_secret) if app_id and app_secret else None
+        if api:
+            full_url = api.resolve_short_link(product_url)
+            item_id = api.extract_item_id(full_url) or api.extract_item_id(product_url)
+            offer = api.get_product_offer(item_id) if item_id else None
+            if offer:
+                aff_link = offer.get("offerLink") or api.generate_short_link(full_url)
+                msg = api.format_product_message(offer, aff_link)
+                media_url = offer.get("imageUrl")
+            else:
+                aff_link = api.generate_short_link(full_url) or product_url
+                msg = f"🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n👉 {aff_link}"
+                media_url = None
+        else:
+            msg = f"🔥 Oferta importada:\n👉 {product_url}"
+            media_url = None
+        store_name = "Shopee"
 
     add_to_queue(
-        store="Shopee",
+        store=store_name,
         product_url=product_url,
         message=msg,
         media_url=media_url,
