@@ -28,12 +28,19 @@ def init_db():
             status TEXT DEFAULT 'pending',
             target_date TEXT,
             scheduled_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            category TEXT DEFAULT 'Geral'
         )
     """)
 
     try:
         cursor.execute("ALTER TABLE queue ADD COLUMN media_type TEXT DEFAULT 'image'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE queue ADD COLUMN category TEXT DEFAULT 'Geral'")
         conn.commit()
     except sqlite3.OperationalError:
         pass
@@ -120,6 +127,7 @@ def add_to_queue(
     media_type: str = "image",
     priority: int = 0,
     target_date: str = None,
+    category: str = "Geral",
 ):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -129,8 +137,8 @@ def add_to_queue(
 
     cursor.execute(
         """
-        INSERT INTO queue (store, product_url, formatted_message, media_url, media_type, priority, status, target_date, scheduled_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        INSERT INTO queue (store, product_url, formatted_message, media_url, media_type, priority, status, target_date, scheduled_at, created_at, category)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
     """,
         (
             store,
@@ -142,6 +150,7 @@ def add_to_queue(
             target_date,
             now_cuiaba,
             now_cuiaba,
+            category or "Geral",
         ),
     )
     conn.commit()

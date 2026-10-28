@@ -5,10 +5,47 @@ import re
 import json
 import asyncio
 import random
+import logging
 from datetime import datetime, timezone, timedelta
-from database import add_to_queue, is_offer_recent
+from database import add_to_queue, is_offer_recent, get_config
+from offer_comparator import (
+    is_product_recently_used_or_blocked,
+    load_recent_queue_profiles,
+)
 
+logger = logging.getLogger(__name__)
 cuiaba_tz = timezone(timedelta(hours=-4))
+
+# Expansão de subtermos por categoria para multiplicar a variedade de páginas na API
+CATEGORY_SEARCH_EXPANSION = {
+    "roupas femininas": [
+        "Roupas Femininas",
+        "Vestido Feminino",
+        "Blusa Feminina",
+        "Calça Feminina",
+        "Conjunto Feminino",
+        "Moda Feminina",
+        "Cropped Feminino",
+        "Saia Feminina",
+    ],
+    "moda infantil": [
+        "Moda Infantil",
+        "Roupa Infantil Menina",
+        "Roupa Infantil Menino",
+        "Conjunto Infantil",
+        "Vestido Infantil",
+        "Calçado Infantil",
+        "Enxoval Bebê Roupa",
+    ],
+    "sapatos femininos": [
+        "Sapatos Femininos",
+        "Sandália Feminina",
+        "Tênis Feminino",
+        "Rasteirinha Feminina",
+        "Bota Scarpin Feminino",
+        " Sapatilha Mule Feminino",
+    ],
+}
 
 
 class ShopeeAffiliateAPI:
@@ -37,14 +74,16 @@ class ShopeeAffiliateAPI:
                 self.GRAPHQL_URL,
                 data=payload_str.encode("utf-8"),
                 headers=headers,
-                timeout=15,
+                timeout=20,
             )
             resp.raise_for_status()
             data = resp.json()
             if "errors" in data:
+                logger.warning(f"Aviso GraphQL Shopee: {data['errors']}")
                 return {}
             return data.get("data", {})
-        except Exception:
+        except Exception as e:
+            logger.error(f"Erro na requisição GraphQL Shopee: {e}")
             return {}
 
     def get_product_offer(self, item_id: int) -> dict | None:
@@ -98,7 +137,7 @@ class ShopeeAffiliateAPI:
         data = self._graphql_request(query)
         conn_data = data.get("productOfferV2", {})
         nodes = conn_data.get("nodes", [])
-        has_next = conn_data.get("pageInfo", {}).get("hasNextPage", False)
+        has_next = bool(conn_data.get("pageInfo", {}).get("hasNextPage", False))
         return nodes, has_next
 
     def get_best_selling_offers(
@@ -136,7 +175,7 @@ class ShopeeAffiliateAPI:
         data = self._graphql_request(query)
         conn_data = data.get("productOfferV2", {})
         nodes = conn_data.get("nodes", [])
-        has_next = conn_data.get("pageInfo", {}).get("hasNextPage", False)
+        has_next = bool(conn_data.get("pageInfo", {}).get("hasNextPage", False))
         return nodes, has_next
 
     async def extract_shopee_video_fast(self, browser, product_url: str) -> str | None:
@@ -310,11 +349,8 @@ class ShopeeAffiliateAPI:
 
     def format_product_message(self, offer: dict, link: str) -> str:
         raw_name = offer.get("productName", "Produto Incrível")
-
-        # Limpeza do título: remove espaços duplos
         clean_name = " ".join(raw_name.split())
 
-        # Corte inteligente: se passar de 100 caracteres, corta no último espaço antes do limite
         if len(clean_name) > 100:
             clean_name = clean_name[:100].rsplit(" ", 1)[0] + "..."
 
@@ -328,7 +364,6 @@ class ShopeeAffiliateAPI:
             p_max = float(price_max) if price_max else p_min
 
             if p_min != p_max and p_max > 0:
-                # Substitui a faixa de preço por "A partir de"
                 msg += (
                     f"💰 <b>Preço:</b> A partir de R$ {p_min:,.2f}\n\n".replace(
                         ",", "X"
@@ -347,6 +382,248 @@ class ShopeeAffiliateAPI:
         msg += f"\n👉 {link}"
         return msg
 
+    # ==========================================================================
+    # COLETA PROFUNDA PAGINADA (SEM LIMITE BAIXO DE PÁGINAS)
+    # ==========================================================================
+    def get_category_offers_pool(
+        self, categories_csv: str, max_pages_per_term: int = 3
+    ) -> list[dict]:
+        """
+        Método auxiliar de compatibilidade (usado também pelo script de diagnóstico).
+        """
+        raw_categories = [
+            c.strip() for c in (categories_csv or "").split(",") if c.strip()
+        ]
+        if not raw_categories:
+            raw_categories = [
+                "Roupas Femininas",
+                "Moda Infantil",
+                "Sapatos Femininos",
+            ]
+
+        pool: list[dict] = []
+        for cat in raw_categories:
+            cat_lower = cat.lower()
+            subterms = CATEGORY_SEARCH_EXPANSION.get(cat_lower, [cat])
+            chosen_terms = random.sample(subterms, k=min(2, len(subterms)))
+
+            for term in chosen_terms:
+                page = 1
+                pages_fetched = 0
+                while pages_fetched < max_pages_per_term:
+                    nodes, has_next = self.get_best_selling_offers(
+                        keyword=term, page=page, limit=50
+                    )
+                    if not nodes:
+                        break
+                    for n in nodes:
+                        n["_source_bucket"] = cat
+                    pool.extend(nodes)
+                    pages_fetched += 1
+                    if not has_next:
+                        break
+                    page += 1
+
+        random.shuffle(pool)
+        return pool
+
+    def _harvest_valid_offers_deep(
+        self,
+        target_date: str,
+        dedup_days: int,
+        dedup_threshold: float,
+        general_target: int,
+        categories_target: int,
+        categories_csv: str,
+        keywords_csv: str,
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        """
+        Varre páginas profundas da API da Shopee (usando hasNextPage real, sem trava em 5 ou 10 páginas)
+        filtrando contra o banco de dados até acumular um amplo pool de ofertas INÉDITAS para sortear.
+        Retorna: (valid_general_pool, valid_categories_pool, all_raw_backup_nodes)
+        """
+        preloaded_profiles = load_recent_queue_profiles(days=dedup_days)
+        seen_ids: set[int] = set()
+        all_raw_backup: list[dict] = []
+
+        # Queremos acumular pelo menos 4x a quantidade necessária de ofertas inéditas
+        # para que o sorteio final seja realmente aleatório entre dezenas de opções válidas!
+        desired_general_pool_size = max(general_target * 4, 15)
+        desired_cat_pool_size = max(categories_target * 4, 30)
+
+        def _filter_unseen_nodes(
+            nodes: list[dict], bucket_label: str, existing_pool_titles: list[str]
+        ) -> list[dict]:
+            approved = []
+            for offer in nodes:
+                item_id = offer.get("itemId")
+                if not item_id or item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+
+                product_name = (offer.get("productName") or "").strip()
+                if not product_name:
+                    continue
+
+                offer["_source_bucket"] = bucket_label
+                all_raw_backup.append(offer)
+
+                product_url = (
+                    offer.get("productLink")
+                    or offer.get("offerLink")
+                    or f"https://shopee.com.br/product/0/{item_id}"
+                )
+
+                if is_offer_recent(
+                    product_url,
+                    item_id=item_id,
+                    days=dedup_days,
+                    target_date=target_date,
+                ):
+                    continue
+
+                is_dup, _ = is_product_recently_used_or_blocked(
+                    candidate_title=product_name,
+                    candidate_url=product_url,
+                    days=dedup_days,
+                    threshold=dedup_threshold,
+                    extra_accepted_titles=existing_pool_titles,
+                    preloaded_db_profiles=preloaded_profiles,
+                )
+                if is_dup:
+                    continue
+
+                existing_pool_titles.append(product_name)
+                approved.append(offer)
+            return approved
+
+        # ------------------------------------------------------------------
+        # 1. VARREDURA PROFUNDA DE CATEGORIAS (70%: Roupas Femininas, Moda Infantil, Sapatos Femininos)
+        # ------------------------------------------------------------------
+        raw_categories = [
+            c.strip() for c in (categories_csv or "").split(",") if c.strip()
+        ]
+        if not raw_categories:
+            raw_categories = [
+                "Roupas Femininas",
+                "Moda Infantil",
+                "Sapatos Femininos",
+            ]
+
+        per_cat_desired = max(
+            10, int(desired_cat_pool_size / max(1, len(raw_categories))) + 4
+        )
+        valid_by_cat: dict[str, list[dict]] = {cat: [] for cat in raw_categories}
+        cat_accepted_titles: list[str] = []
+
+        for cat in raw_categories:
+            cat_lower = cat.lower()
+            subterms = list(CATEGORY_SEARCH_EXPANSION.get(cat_lower, [cat]))
+            random.shuffle(subterms)
+
+            # Percorre os subtermos e avança nas páginas (1, 2, 3... até 35) enquanto precisar de inéditos
+            for term in subterms:
+                if len(valid_by_cat[cat]) >= per_cat_desired:
+                    break
+
+                page = 1
+                while page <= 35 and len(valid_by_cat[cat]) < per_cat_desired:
+                    nodes, has_next = self.get_best_selling_offers(
+                        keyword=term, page=page, limit=50
+                    )
+                    if not nodes:
+                        break
+
+                    random.shuffle(nodes)
+                    new_valid = _filter_unseen_nodes(nodes, cat, cat_accepted_titles)
+                    valid_by_cat[cat].extend(new_valid)
+
+                    if not has_next:
+                        break
+                    page += 1
+
+            random.shuffle(valid_by_cat[cat])
+
+        # Combina os candidatos inéditos das 3 categorias em formato Round-Robin (para balancear as 3 categorias)
+        valid_categories_pool: list[dict] = []
+        cat_keys = list(valid_by_cat.keys())
+        while any(valid_by_cat[k] for k in cat_keys):
+            random.shuffle(cat_keys)
+            for k in cat_keys:
+                if valid_by_cat[k]:
+                    valid_categories_pool.append(valid_by_cat[k].pop(0))
+
+        # ------------------------------------------------------------------
+        # 2. VARREDURA PROFUNDA DO MODO GERAL (30%: TOP_PERFORMING + MAIS VENDIDOS)
+        # ------------------------------------------------------------------
+        valid_general_pool: list[dict] = []
+        gen_accepted_titles: list[str] = list(cat_accepted_titles)
+        keywords = [k.strip() for k in (keywords_csv or "").split(",") if k.strip()]
+
+        # 2.A: Avança nas páginas de TOP_PERFORMING enquanto precisar de itens inéditos
+        page_top = 1
+        while page_top <= 35 and len(valid_general_pool) < (
+            desired_general_pool_size // 2 + 5
+        ):
+            nodes, has_next = self.get_top_performing_offers(page=page_top, limit=50)
+            if not nodes:
+                break
+            random.shuffle(nodes)
+            valid_general_pool.extend(
+                _filter_unseen_nodes(nodes, "Mais Vendidos / Top", gen_accepted_titles)
+            )
+            if not has_next:
+                break
+            page_top += 1
+
+        # 2.B: Avança nas páginas de MAIS VENDIDOS (por palavra-chave ou geral)
+        if keywords:
+            random.shuffle(keywords)
+            for kw in keywords:
+                if len(valid_general_pool) >= desired_general_pool_size:
+                    break
+                page_kw = 1
+                while (
+                    page_kw <= 35
+                    and len(valid_general_pool) < desired_general_pool_size
+                ):
+                    nodes, has_next = self.get_best_selling_offers(
+                        keyword=kw, page=page_kw, limit=50
+                    )
+                    if not nodes:
+                        break
+                    random.shuffle(nodes)
+                    valid_general_pool.extend(
+                        _filter_unseen_nodes(
+                            nodes, f"Busca: {kw.title()}", gen_accepted_titles
+                        )
+                    )
+                    if not has_next:
+                        break
+                    page_kw += 1
+        else:
+            page_sold = 1
+            while (
+                page_sold <= 35 and len(valid_general_pool) < desired_general_pool_size
+            ):
+                nodes, has_next = self.get_best_selling_offers(
+                    keyword=None, page=page_sold, limit=50
+                )
+                if not nodes:
+                    break
+                random.shuffle(nodes)
+                valid_general_pool.extend(
+                    _filter_unseen_nodes(
+                        nodes, "Mais Vendidos / Top", gen_accepted_titles
+                    )
+                )
+                if not has_next:
+                    break
+                page_sold += 1
+
+        random.shuffle(valid_general_pool)
+        return valid_general_pool, valid_categories_pool, all_raw_backup
+
     def generate_auto_offers_to_queue(
         self,
         count: int = 15,
@@ -354,67 +631,110 @@ class ShopeeAffiliateAPI:
         keywords_csv: str | None = None,
     ) -> int:
         """
-        Mescla ofertas de TOP_PERFORMING (listType = 2) e Mais Vendidos (sortType = 2),
-        embaralha a ordem, ignora produtos repetidos nos últimos 2 dias e salva na fila.
+        Gera ofertas automáticas da Shopee dividindo:
+        - 30% (configurável em `shopee_general_pct`): Busca Geral (TOP_PERFORMING + Mais Vendidos)
+        - 70% (restante): Categorias específicas (Roupas Femininas, Moda Infantil, Sapatos Femininos)
+        Varre páginas profundas sem limite baixo e sorteia dentro dos inéditos.
         """
         if not target_date:
             target_date = datetime.now(cuiaba_tz).strftime("%Y-%m-%d")
 
         if keywords_csv is None:
-            from database import get_config
-
             keywords_csv = get_config("auto_keywords") or ""
 
-        keywords = [k.strip() for k in keywords_csv.split(",") if k.strip()]
+        general_pct = int(get_config("shopee_general_pct") or "30")
+        general_pct = max(0, min(100, general_pct))
+        target_categories_csv = (
+            get_config("shopee_target_categories")
+            or "Roupas Femininas, Moda Infantil, Sapatos Femininos"
+        )
 
-        pages_top = [1, 2, 3, 4, 5]
-        pages_sold = [1, 2, 3, 4, 5]
-        random.shuffle(pages_top)
-        random.shuffle(pages_sold)
+        dedup_days = int(get_config("dedup_history_days") or "7")
+        dedup_threshold = float(get_config("dedup_similarity_threshold") or "60")
 
-        collected_offers = []
+        general_target = round(count * (general_pct / 100.0))
+        if general_pct > 0 and count >= 2 and general_target == 0:
+            general_target = 1
+        categories_target = max(0, count - general_target)
 
-        # 1. Coleta lote de TOP_PERFORMING (listType = 2)
-        for page in pages_top[:2]:
-            nodes, _ = self.get_top_performing_offers(page=page, limit=50)
-            if nodes:
-                collected_offers.extend(nodes)
+        logger.info(
+            f"🔎 Iniciando varredura paginada profunda na Shopee: meta={count} ({general_target} Geral / {categories_target} Categorias)..."
+        )
 
-        # 2. Coleta lote de MAIS VENDIDOS (sortType = 2)
-        if keywords:
-            random.shuffle(keywords)
-            for kw in keywords[:3]:
-                nodes, _ = self.get_best_selling_offers(
-                    keyword=kw, page=random.choice([1, 2]), limit=50
+        valid_general_pool, valid_categories_pool, all_raw_backup = (
+            self._harvest_valid_offers_deep(
+                target_date=target_date,
+                dedup_days=dedup_days,
+                dedup_threshold=dedup_threshold,
+                general_target=general_target,
+                categories_target=categories_target,
+                categories_csv=target_categories_csv,
+                keywords_csv=keywords_csv,
+            )
+        )
+
+        logger.info(
+            f"🎯 Pools de inéditos prontos para sorteio: {len(valid_categories_pool)} de Categorias | {len(valid_general_pool)} Gerais."
+        )
+
+        # Sorteia dentro dos pools de inéditos
+        chosen_categories = valid_categories_pool[:categories_target]
+        remaining_cat = valid_categories_pool[categories_target:]
+
+        chosen_general = valid_general_pool[:general_target]
+        remaining_gen = valid_general_pool[general_target:]
+
+        # Se uma das duas listas (30% ou 70%) teve menos inéditos que a cota, completa com a sobra da outra
+        total_so_far = len(chosen_general) + len(chosen_categories)
+        if total_so_far < count:
+            missing = count - total_so_far
+            leftovers = remaining_cat + remaining_gen
+            chosen_categories.extend(leftovers[:missing])
+
+        # VÁLVULA DE SEGURANÇA ANTI-TRAVAMENTO:
+        # Se mesmo varrendo dezenas de páginas ainda faltarem itens para bater `count`,
+        # relaxa a janela de repetição apenas para os itens faltantes (ex: não repetir no mesmo dia/últimos 2 dias)
+        total_so_far = len(chosen_general) + len(chosen_categories)
+        if total_so_far < count and all_raw_backup:
+            missing = count - total_so_far
+            logger.warning(
+                f"⚠️ Pool estrito de {dedup_days}d rendeu {total_so_far}/{count} itens. Acionando fallback seguro para completar +{missing} ofertas!"
+            )
+            already_chosen_ids = {
+                o.get("itemId") for o in (chosen_general + chosen_categories)
+            }
+            random.shuffle(all_raw_backup)
+            for backup_offer in all_raw_backup:
+                if len(chosen_general) + len(chosen_categories) >= count:
+                    break
+                b_id = backup_offer.get("itemId")
+                if not b_id or b_id in already_chosen_ids:
+                    continue
+                b_url = (
+                    backup_offer.get("productLink")
+                    or backup_offer.get("offerLink")
+                    or f"https://shopee.com.br/product/0/{b_id}"
                 )
-                if nodes:
-                    collected_offers.extend(nodes)
-        else:
-            for page in pages_sold[:2]:
-                nodes, _ = self.get_best_selling_offers(
-                    keyword=None, page=page, limit=50
-                )
-                if nodes:
-                    collected_offers.extend(nodes)
+                # Garante que pelo menos não esteja na fila de hoje/ontem
+                if is_offer_recent(
+                    b_url, item_id=b_id, days=1, target_date=target_date
+                ):
+                    continue
+                already_chosen_ids.add(b_id)
+                chosen_categories.append(backup_offer)
 
-        if not collected_offers:
-            return 0
-
-        # Embaralha todas as ofertas mescladas para intercalar TOP_PERFORMING e Mais Vendidos
-        random.shuffle(collected_offers)
+        # Intercala as ofertas (2 de Categorias para 1 Geral) para distribuir ao longo do dia
+        final_offers: list[dict] = []
+        while chosen_categories or chosen_general:
+            for _ in range(2):
+                if chosen_categories:
+                    final_offers.append(chosen_categories.pop(0))
+            if chosen_general:
+                final_offers.append(chosen_general.pop(0))
 
         added = 0
-        seen_ids = set()
-
-        for offer in collected_offers:
-            if added >= count:
-                break
-
+        for offer in final_offers:
             item_id = offer.get("itemId")
-            if not item_id or item_id in seen_ids:
-                continue
-            seen_ids.add(item_id)
-
             product_url = (
                 offer.get("productLink")
                 or offer.get("offerLink")
@@ -426,14 +746,9 @@ class ShopeeAffiliateAPI:
                 or product_url
             )
 
-            # Ignora se já foi inserido nos últimos 2 dias ou na data alvo
-            if is_offer_recent(
-                product_url, item_id=item_id, days=2, target_date=target_date
-            ):
-                continue
-
             msg = self.format_product_message(offer, aff_link)
             media_url = offer.get("imageUrl")
+            category_name = offer.get("_source_bucket", "Mais Vendidos / Top")
 
             add_to_queue(
                 store="Shopee",
@@ -441,9 +756,221 @@ class ShopeeAffiliateAPI:
                 message=msg,
                 media_url=media_url,
                 media_type="image",
-                priority=0,  # 0 = Auto
+                priority=0,
                 target_date=target_date,
+                category=category_name,
             )
             added += 1
 
+        logger.info(
+            f"✅ Shopee Auto concluído: {added}/{count} ofertas inéditas sorteadas e inseridas na fila ({target_date})."
+        )
         return added
+
+    # ==========================================================================
+    # RELATÓRIO DE VENDAS E COMISSÕES (CONVERSION REPORT)
+    # ==========================================================================
+    def get_sales_report(self, days: int = 30) -> dict:
+        """
+        Busca os pedidos e comissões gerados na Shopee via GraphQL `conversionReport`.
+        """
+        now_dt = datetime.now(cuiaba_tz)
+        start_dt = now_dt - timedelta(days=days)
+        purchase_time_start = int(start_dt.timestamp())
+        purchase_time_end = int(now_dt.timestamp())
+
+        query_full = f"""query {{
+            conversionReport(purchaseTimeStart: {purchase_time_start}, purchaseTimeEnd: {purchase_time_end}, limit: 100) {{
+                nodes {{
+                    conversionId
+                    purchaseTime
+                    totalCommission
+                    netCommission
+                    buyerType
+                    orders {{
+                        orderId
+                        orderStatus
+                        items {{
+                            itemId
+                            itemName
+                            itemPrice
+                            actualAmount
+                            qty
+                            itemTotalCommission
+                            imageUrl
+                        }}
+                    }}
+                }}
+                pageInfo {{
+                    hasNextPage
+                }}
+            }}
+        }}"""
+
+        query_minimal = f"""query {{
+            conversionReport(purchaseTimeStart: {purchase_time_start}, purchaseTimeEnd: {purchase_time_end}, limit: 100) {{
+                nodes {{
+                    conversionId
+                    purchaseTime
+                    totalCommission
+                    orders {{
+                        orderId
+                        orderStatus
+                        items {{
+                            itemName
+                            actualAmount
+                            qty
+                        }}
+                    }}
+                }}
+            }}
+        }}"""
+
+        data = self._graphql_request(query_full)
+        if not data or "conversionReport" not in data:
+            data = self._graphql_request(query_minimal)
+
+        nodes = (data.get("conversionReport") or {}).get("nodes") or []
+
+        orders_list = []
+        total_orders = 0
+        pending_orders = 0
+        completed_orders = 0
+        cancelled_orders = 0
+        total_gmv = 0.0
+        total_commission_valid = 0.0
+        completed_commission = 0.0
+        pending_commission = 0.0
+
+        def _to_float(val) -> float:
+            if val is None or val == "":
+                return 0.0
+            try:
+                return float(str(val).replace(",", "."))
+            except Exception:
+                return 0.0
+
+        for node in nodes:
+            p_time = node.get("purchaseTime")
+            if p_time:
+                try:
+                    dt_str = datetime.fromtimestamp(int(p_time), tz=cuiaba_tz).strftime(
+                        "%d/%m/%Y %H:%M"
+                    )
+                except Exception:
+                    dt_str = str(p_time)
+            else:
+                dt_str = "-"
+
+            conv_comm = _to_float(
+                node.get("netCommission") or node.get("totalCommission")
+            )
+            node_orders = node.get("orders") or []
+
+            if not node_orders:
+                total_orders += 1
+                pending_orders += 1
+                total_commission_valid += conv_comm
+                pending_commission += conv_comm
+                orders_list.append(
+                    {
+                        "platform": "Shopee",
+                        "order_id": str(node.get("conversionId") or "N/A"),
+                        "purchase_time": dt_str,
+                        "raw_ts": int(p_time or 0),
+                        "status": "PENDING",
+                        "status_label": "Pendente",
+                        "items_summary": "Pedido registrado na conversão",
+                        "items_count": 1,
+                        "order_amount": 0.0,
+                        "commission": conv_comm,
+                        "buyer_type": node.get("buyerType") or "-",
+                    }
+                )
+                continue
+
+            for ord_obj in node_orders:
+                order_id = ord_obj.get("orderId") or node.get("conversionId") or "N/A"
+                raw_status = (ord_obj.get("orderStatus") or "PENDING").upper()
+                items = ord_obj.get("items") or []
+
+                order_gmv = 0.0
+                items_comm = 0.0
+                item_names = []
+                total_qty = 0
+
+                for it in items:
+                    qty = int(it.get("qty") or 1)
+                    total_qty += qty
+                    actual_amt = _to_float(
+                        it.get("actualAmount") or it.get("itemPrice")
+                    )
+                    order_gmv += actual_amt
+                    items_comm += _to_float(it.get("itemTotalCommission"))
+                    nm = (it.get("itemName") or "Produto Shopee").strip()
+                    item_names.append(f"{qty}x {nm}")
+
+                order_comm = (
+                    items_comm
+                    if items_comm > 0
+                    else (conv_comm / max(1, len(node_orders)))
+                )
+
+                is_cancelled = any(
+                    k in raw_status
+                    for k in ("CANCEL", "INVALID", "UNPAID", "RETURN", "REJECT")
+                )
+                is_completed = any(
+                    k in raw_status
+                    for k in ("COMPLETE", "COMPLETED", "APPROVED", "PAID")
+                )
+
+                total_orders += 1
+                if is_cancelled:
+                    cancelled_orders += 1
+                    status_label = "Cancelado"
+                elif is_completed:
+                    completed_orders += 1
+                    status_label = "Concluído"
+                    total_gmv += order_gmv
+                    total_commission_valid += order_comm
+                    completed_commission += order_comm
+                else:
+                    pending_orders += 1
+                    status_label = "Pendente"
+                    total_gmv += order_gmv
+                    total_commission_valid += order_comm
+                    pending_commission += order_comm
+
+                orders_list.append(
+                    {
+                        "platform": "Shopee",
+                        "order_id": str(order_id),
+                        "purchase_time": dt_str,
+                        "raw_ts": int(p_time or 0),
+                        "status": raw_status,
+                        "status_label": status_label,
+                        "items_summary": (
+                            " | ".join(item_names) if item_names else "Item Shopee"
+                        ),
+                        "items_count": total_qty or 1,
+                        "order_amount": round(order_gmv, 2),
+                        "commission": round(order_comm, 2),
+                        "buyer_type": node.get("buyerType") or "-",
+                    }
+                )
+
+        orders_list.sort(key=lambda x: x["raw_ts"], reverse=True)
+
+        return {
+            "days": days,
+            "total_orders": total_orders,
+            "pending_orders": pending_orders,
+            "completed_orders": completed_orders,
+            "cancelled_orders": cancelled_orders,
+            "total_gmv": round(total_gmv, 2),
+            "total_commission": round(total_commission_valid, 2),
+            "completed_commission": round(completed_commission, 2),
+            "pending_commission": round(pending_commission, 2),
+            "orders": orders_list,
+        }
