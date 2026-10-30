@@ -121,33 +121,30 @@ async def background_dispatcher():
 
             # OPÇÃO A: Se a fila de hoje estiver vazia e o auto-abastecimento estiver ativo, busca novas ofertas!
             if not offer and (get_config("auto_refill_enabled") or "1") == "1":
-                app_id = os.environ.get("SHOPEE_APP_ID")
-                app_secret = os.environ.get("SHOPEE_APP_SECRET")
-                if app_id and app_secret:
-                    refill_count = int(get_config("auto_refill_count") or "15")
-                    keywords_csv = get_config("auto_keywords") or ""
-                    logger.info(
-                        f"🔄 [AUTO-ABASTECIMENTO] Fila de hoje ({today_str}) vazia! Buscando {refill_count} ofertas (TOP_PERFORMING + Mais Vendidos)..."
-                    )
-                    loop = asyncio.get_running_loop()
-                    api = ShopeeAffiliateAPI(app_id, app_secret)
-                    added_count = await loop.run_in_executor(
-                        None,
-                        api.generate_auto_offers_to_queue,
-                        refill_count,
-                        today_str,
-                        keywords_csv,
-                    )
-                    if added_count > 0:
-                        logger.info(
-                            f"✅ [AUTO-ABASTECIMENTO] {added_count} novas ofertas adicionadas para hoje ({today_str})!"
-                        )
-                        offer = get_next_pending_offer(today_str)
-                    else:
-                        logger.warning(
-                            "⚠️ [AUTO-ABASTECIMENTO] Nenhuma oferta inédita encontrada na API neste momento."
-                        )
+                refill_count = int(get_config("auto_refill_count") or "15")
+                keywords_csv = get_config("auto_keywords") or ""
+                logger.info(
+                    f"🔄 [AUTO-ABASTECIMENTO] Fila de hoje ({today_str}) vazia! Gerando {refill_count} ofertas (Mix Shopee + ML)..."
+                )
 
+                import ml_auto
+
+                res_refill = await asyncio.to_thread(
+                    ml_auto.generate_mixed_auto_offers_to_queue,
+                    refill_count,
+                    today_str,
+                    keywords_csv,
+                )
+
+                if res_refill["total_added"] > 0:
+                    logger.info(
+                        f"✅ [AUTO-ABASTECIMENTO] {res_refill['total_added']} ofertas adicionadas ({res_refill['shopee_added']} Shopee + {res_refill['ml_added']} ML)!"
+                    )
+                    offer = get_next_pending_offer(today_str)
+                else:
+                    logger.warning(
+                        "⚠️ [AUTO-ABASTECIMENTO] Nenhuma oferta inédita gerada no ciclo atual."
+                    )
             if offer:
                 (
                     offer_id,
@@ -166,9 +163,13 @@ async def background_dispatcher():
                     f"📤 [DISPARO AUTOMÁTICO] Processando oferta ID {offer_id} ({store} | Mídia: {'VÍDEO' if is_video else 'IMAGEM'})..."
                 )
 
-                if priority == 1 and store.lower() == "shopee":
+                # Só sobrescreve a copy se for o template padrão da Shopee;
+                # se for um texto personalizado do Telegram (com múltiplos links ou cupom), preserva o texto!
+                is_standard_template = "💡 <b>POR QUE VALE A PENA?</b>" in (
+                    formatted_message or ""
+                )
+                if priority == 1 and store.lower() == "shopee" and is_standard_template:
                     fresh_msg, fresh_image = refresh_offer_data(product_url)
-                    # Preserva o vídeo (.mp4) salvo no banco e atualiza apenas o texto/preço!
                     fresh_media = media_url if (is_video and media_url) else fresh_image
                 else:
                     fresh_msg, fresh_media = formatted_message, media_url

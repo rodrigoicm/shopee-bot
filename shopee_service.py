@@ -6,7 +6,9 @@ import json
 import asyncio
 import random
 import logging
+import html as html_lib
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from database import add_to_queue, is_offer_recent, get_config
 from offer_comparator import (
     is_product_recently_used_or_blocked,
@@ -43,7 +45,7 @@ CATEGORY_SEARCH_EXPANSION = {
         "Tênis Feminino",
         "Rasteirinha Feminina",
         "Bota Scarpin Feminino",
-        " Sapatilha Mule Feminino",
+        "Sapatilha Mule Feminino",
     ],
 }
 
@@ -293,6 +295,12 @@ class ShopeeAffiliateAPI:
         return result.get("generateShortLink", {}).get("shortLink", "")
 
     def resolve_short_link(self, short_url: str) -> str:
+        # Limpa eventual horário/views do Telegram/WhatsApp colado no final do link curto
+        short_url = re.sub(
+            r"(https?://s\.shopee\.com\.br/[A-Za-z0-9]{10}).*$",
+            r"\1",
+            short_url.strip(),
+        )
         try:
             session = requests.Session()
             resp = session.get(
@@ -304,6 +312,62 @@ class ShopeeAffiliateAPI:
             return resp.url
         except Exception:
             return short_url
+
+    def clean_shopee_url_for_affiliate(self, url: str) -> str:
+        """
+        Expande links curtos (s.shopee.com.br / shope.ee) e remove parâmetros de tracking
+        de terceiros, mantendo parâmetros úteis de páginas de cupom/evento.
+        """
+        resolved = (
+            self.resolve_short_link(url)
+            if (
+                url.startswith("http")
+                and ("s.shopee" in url or "shope.ee" in url or "shp.ee" in url)
+            )
+            else url
+        )
+        try:
+            parsed = urlparse(resolved)
+            if "/product/" in parsed.path or re.search(r"-i\.\d+\.\d+", parsed.path):
+                return urlunparse(
+                    (parsed.scheme, parsed.netloc, parsed.path, "", "", "")
+                )
+
+            blocked_params = {
+                "uls_trackid",
+                "utm_source",
+                "utm_medium",
+                "utm_campaign",
+                "utm_content",
+                "utm_term",
+                "mmp_pid",
+                "af_siteid",
+                "af_click_lookback",
+                "af_viewthrough_lookback",
+                "pid",
+                "c",
+                "is_from_login",
+                "smtt",
+                "sp_atk",
+                "xptdk",
+            }
+            clean_query = [
+                (k, v)
+                for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+                if k.lower() not in blocked_params and not k.lower().startswith("af_")
+            ]
+            return urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    "",
+                    urlencode(clean_query),
+                    "",
+                )
+            )
+        except Exception:
+            return resolved
 
     def extract_item_id(self, url: str) -> int | None:
         match_param = re.search(r"[?&](?:itemId|item_id)=(\d+)", url, re.IGNORECASE)
@@ -324,7 +388,12 @@ class ShopeeAffiliateAPI:
             return int(match_end_id.group(1))
         return None
 
-    def generate_persuasive_copy(self, offer: dict) -> str:
+    def generate_persuasive_copy(
+        self,
+        offer: dict,
+        store_name: str = "Shopee",
+        extra_coupon_links: list[str] | None = None,
+    ) -> str:
         discount = offer.get("priceDiscountRate")
         rating = offer.get("ratingStar")
         sales = offer.get("sales")
@@ -337,7 +406,14 @@ class ShopeeAffiliateAPI:
         if rating and float(rating) >= 4.0:
             lines.append(f"⭐ Avaliação: <b>{rating}/5.0</b>")
 
-        lines.append("\n🏪 Loja: <b>Shopee</b>")
+        lines.append(f"\n🏪 Loja: <b>{html_lib.escape(store_name)}</b>")
+
+        if extra_coupon_links:
+            for c_link in extra_coupon_links:
+                lines.append(
+                    f"\n🎟️ <b>Resgate os cupons disponíveis aqui:</b>\n👉 {c_link}"
+                )
+
         lines.append(
             "\n\n🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>"
         )
@@ -347,14 +423,20 @@ class ShopeeAffiliateAPI:
         lines.append("\n👇 <b>Clique no link abaixo para garantir o seu:</b>")
         return "\n".join(lines)
 
-    def format_product_message(self, offer: dict, link: str) -> str:
+    def format_product_message(
+        self,
+        offer: dict,
+        link: str,
+        store_name: str = "Shopee",
+        extra_coupon_links: list[str] | None = None,
+    ) -> str:
         raw_name = offer.get("productName", "Produto Incrível")
         clean_name = " ".join(raw_name.split())
 
         if len(clean_name) > 100:
             clean_name = clean_name[:100].rsplit(" ", 1)[0] + "..."
 
-        msg = f"🔥 <b>{clean_name}</b>\n\n"
+        msg = f"🔥 <b>{html_lib.escape(clean_name)}</b>\n\n"
 
         price_min = offer.get("priceMin")
         price_max = offer.get("priceMax")
@@ -378,9 +460,31 @@ class ShopeeAffiliateAPI:
                     .replace("X", ".")
                 )
 
-        msg += self.generate_persuasive_copy(offer)
+        msg += self.generate_persuasive_copy(
+            offer, store_name=store_name, extra_coupon_links=extra_coupon_links
+        )
         msg += f"\n👉 {link}"
         return msg
+
+    @staticmethod
+    def format_coupon_page_message(
+        aff_link: str, store_name: str = "Shopee", custom_title: str | None = None
+    ) -> str:
+        """Gera uma mensagem especial quando o link enviado é de uma Página de Cupons / Campanha."""
+        header = (
+            custom_title
+            or f"🎟️ <b>CENTRAL DE CUPONS E DESCONTOS {store_name.upper()}!</b>"
+        )
+        return (
+            f"{header}\n\n"
+            "🔥 <b>Liberamos a página oficial com todos os cupons ativos do dia!</b>\n\n"
+            "✅ Cupons de <b>Frete Grátis</b> extras\n"
+            "✅ Descontos em <b>Lojas Oficiais</b> e Moedas\n"
+            "✅ Vouchers especiais por categoria\n\n"
+            "⚠️ <i>Dica: Resgate agora mesmo antes que esgotem os lotes e aplique no seu carrinho!</i>\n\n"
+            "👇 <b>Clique no link abaixo para resgatar todos os cupons:</b>\n"
+            f"👉 {aff_link}"
+        )
 
     # ==========================================================================
     # COLETA PROFUNDA PAGINADA (SEM LIMITE BAIXO DE PÁGINAS)
@@ -388,9 +492,6 @@ class ShopeeAffiliateAPI:
     def get_category_offers_pool(
         self, categories_csv: str, max_pages_per_term: int = 3
     ) -> list[dict]:
-        """
-        Método auxiliar de compatibilidade (usado também pelo script de diagnóstico).
-        """
         raw_categories = [
             c.strip() for c in (categories_csv or "").split(",") if c.strip()
         ]
@@ -437,17 +538,10 @@ class ShopeeAffiliateAPI:
         categories_csv: str,
         keywords_csv: str,
     ) -> tuple[list[dict], list[dict], list[dict]]:
-        """
-        Varre páginas profundas da API da Shopee (usando hasNextPage real, sem trava em 5 ou 10 páginas)
-        filtrando contra o banco de dados até acumular um amplo pool de ofertas INÉDITAS para sortear.
-        Retorna: (valid_general_pool, valid_categories_pool, all_raw_backup_nodes)
-        """
         preloaded_profiles = load_recent_queue_profiles(days=dedup_days)
         seen_ids: set[int] = set()
         all_raw_backup: list[dict] = []
 
-        # Queremos acumular pelo menos 4x a quantidade necessária de ofertas inéditas
-        # para que o sorteio final seja realmente aleatório entre dezenas de opções válidas!
         desired_general_pool_size = max(general_target * 4, 15)
         desired_cat_pool_size = max(categories_target * 4, 30)
 
@@ -497,9 +591,7 @@ class ShopeeAffiliateAPI:
                 approved.append(offer)
             return approved
 
-        # ------------------------------------------------------------------
-        # 1. VARREDURA PROFUNDA DE CATEGORIAS (70%: Roupas Femininas, Moda Infantil, Sapatos Femininos)
-        # ------------------------------------------------------------------
+        # 1. VARREDURA PROFUNDA DE CATEGORIAS (70%)
         raw_categories = [
             c.strip() for c in (categories_csv or "").split(",") if c.strip()
         ]
@@ -521,7 +613,6 @@ class ShopeeAffiliateAPI:
             subterms = list(CATEGORY_SEARCH_EXPANSION.get(cat_lower, [cat]))
             random.shuffle(subterms)
 
-            # Percorre os subtermos e avança nas páginas (1, 2, 3... até 35) enquanto precisar de inéditos
             for term in subterms:
                 if len(valid_by_cat[cat]) >= per_cat_desired:
                     break
@@ -544,7 +635,6 @@ class ShopeeAffiliateAPI:
 
             random.shuffle(valid_by_cat[cat])
 
-        # Combina os candidatos inéditos das 3 categorias em formato Round-Robin (para balancear as 3 categorias)
         valid_categories_pool: list[dict] = []
         cat_keys = list(valid_by_cat.keys())
         while any(valid_by_cat[k] for k in cat_keys):
@@ -553,14 +643,11 @@ class ShopeeAffiliateAPI:
                 if valid_by_cat[k]:
                     valid_categories_pool.append(valid_by_cat[k].pop(0))
 
-        # ------------------------------------------------------------------
-        # 2. VARREDURA PROFUNDA DO MODO GERAL (30%: TOP_PERFORMING + MAIS VENDIDOS)
-        # ------------------------------------------------------------------
+        # 2. VARREDURA PROFUNDA DO MODO GERAL (30%)
         valid_general_pool: list[dict] = []
         gen_accepted_titles: list[str] = list(cat_accepted_titles)
         keywords = [k.strip() for k in (keywords_csv or "").split(",") if k.strip()]
 
-        # 2.A: Avança nas páginas de TOP_PERFORMING enquanto precisar de itens inéditos
         page_top = 1
         while page_top <= 35 and len(valid_general_pool) < (
             desired_general_pool_size // 2 + 5
@@ -576,7 +663,6 @@ class ShopeeAffiliateAPI:
                 break
             page_top += 1
 
-        # 2.B: Avança nas páginas de MAIS VENDIDOS (por palavra-chave ou geral)
         if keywords:
             random.shuffle(keywords)
             for kw in keywords:
@@ -630,12 +716,6 @@ class ShopeeAffiliateAPI:
         target_date: str | None = None,
         keywords_csv: str | None = None,
     ) -> int:
-        """
-        Gera ofertas automáticas da Shopee dividindo:
-        - 30% (configurável em `shopee_general_pct`): Busca Geral (TOP_PERFORMING + Mais Vendidos)
-        - 70% (restante): Categorias específicas (Roupas Femininas, Moda Infantil, Sapatos Femininos)
-        Varre páginas profundas sem limite baixo e sorteia dentro dos inéditos.
-        """
         if not target_date:
             target_date = datetime.now(cuiaba_tz).strftime("%Y-%m-%d")
 
@@ -677,23 +757,18 @@ class ShopeeAffiliateAPI:
             f"🎯 Pools de inéditos prontos para sorteio: {len(valid_categories_pool)} de Categorias | {len(valid_general_pool)} Gerais."
         )
 
-        # Sorteia dentro dos pools de inéditos
         chosen_categories = valid_categories_pool[:categories_target]
         remaining_cat = valid_categories_pool[categories_target:]
 
         chosen_general = valid_general_pool[:general_target]
         remaining_gen = valid_general_pool[general_target:]
 
-        # Se uma das duas listas (30% ou 70%) teve menos inéditos que a cota, completa com a sobra da outra
         total_so_far = len(chosen_general) + len(chosen_categories)
         if total_so_far < count:
             missing = count - total_so_far
             leftovers = remaining_cat + remaining_gen
             chosen_categories.extend(leftovers[:missing])
 
-        # VÁLVULA DE SEGURANÇA ANTI-TRAVAMENTO:
-        # Se mesmo varrendo dezenas de páginas ainda faltarem itens para bater `count`,
-        # relaxa a janela de repetição apenas para os itens faltantes (ex: não repetir no mesmo dia/últimos 2 dias)
         total_so_far = len(chosen_general) + len(chosen_categories)
         if total_so_far < count and all_raw_backup:
             missing = count - total_so_far
@@ -715,7 +790,6 @@ class ShopeeAffiliateAPI:
                     or backup_offer.get("offerLink")
                     or f"https://shopee.com.br/product/0/{b_id}"
                 )
-                # Garante que pelo menos não esteja na fila de hoje/ontem
                 if is_offer_recent(
                     b_url, item_id=b_id, days=1, target_date=target_date
                 ):
@@ -723,7 +797,6 @@ class ShopeeAffiliateAPI:
                 already_chosen_ids.add(b_id)
                 chosen_categories.append(backup_offer)
 
-        # Intercala as ofertas (2 de Categorias para 1 Geral) para distribuir ao longo do dia
         final_offers: list[dict] = []
         while chosen_categories or chosen_general:
             for _ in range(2):
@@ -771,9 +844,6 @@ class ShopeeAffiliateAPI:
     # RELATÓRIO DE VENDAS E COMISSÕES (CONVERSION REPORT)
     # ==========================================================================
     def get_sales_report(self, days: int = 30) -> dict:
-        """
-        Busca os pedidos e comissões gerados na Shopee via GraphQL `conversionReport`.
-        """
         now_dt = datetime.now(cuiaba_tz)
         start_dt = now_dt - timedelta(days=days)
         purchase_time_start = int(start_dt.timestamp())

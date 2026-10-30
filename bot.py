@@ -2,14 +2,12 @@ import os
 import re
 import html
 import json
-import time
-import hashlib
 import logging
 import asyncio
-import sys
 import requests
 import ml_offer
-from typing import List
+from ml_affiliate import create_affiliate_link_full
+import ml_auto
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,8 +22,13 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Browser, Playwright
 
-from database import init_db, add_to_queue
-from shopee_service import ShopeeAffiliateAPI as ServiceShopeeAPI
+from database import init_db, add_to_queue, get_config
+from shopee_service import ShopeeAffiliateAPI
+from whatsapp_service import (
+    send_whatsapp_offer,
+    WHATSAPP_GROUP_PRINCIPAL,
+    WHATSAPP_GROUP_PARCERIA,
+)
 
 load_dotenv()
 
@@ -33,23 +36,7 @@ TOKEN = os.environ["BOT_TOKEN"]
 cuiaba_tz = timezone(timedelta(hours=-4))
 init_db()
 
-# ---------- CONFIGURAÇÕES DA EVOLUTION API LOCAL E GRUPOS ----------
-EVOLUTION_API_URL = os.environ.get("EVOLUTION_API_URL", "http://localhost:8080").rstrip(
-    "/"
-)
-EVOLUTION_API_KEY = os.environ.get("EVOLUTION_API_KEY", "")
-EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "chip_01")
-
-WHATSAPP_GROUP_PRINCIPAL = os.environ.get(
-    "WHATSAPP_GROUP_PRINCIPAL", "120363421300618666@g.us"
-)
-WHATSAPP_GROUP_PARCERIA = os.environ.get(
-    "WHATSAPP_GROUP_PARCERIA", "556596440424-1585878265@g.us"
-)
-
 ML_DEFAULT_CUPON_LINK = "https://mercadolivre.com/sec/2YCiHoZ"
-
-CONVITE_GRUPO = ""
 
 SHOPEE_URL_PATTERN = (
     r"https?://(?:[a-zA-Z0-9-]+\.)?(?:shopee\.com\.br|shope\.ee|br\.shp\.ee)/[^\s]+"
@@ -60,7 +47,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ---------- ESTADO GLOBAL DO MERCADO LIVRE ----------
+# ---------- ESTADO GLOBAL DO BROWSER / FILA ASSÍNCRONA ----------
 @dataclass
 class MLState:
     playwright: Playwright | None = None
@@ -91,7 +78,7 @@ def load_ml_cookies() -> None:
     cookies_json_str = os.environ.get("ML_COOKIES_JSON")
     if not cookies_json_str:
         logger.warning(
-            "⚠️ ML_COOKIES_JSON não configurado — conversão de links do Mercado Livre ficará indisponível."
+            "⚠️ ML_COOKIES_JSON não configurado — usando ML_AFFILIATE_COOKIE do .env."
         )
         return
 
@@ -142,106 +129,6 @@ async def maybe_warn_cookie_expiration(update: Update) -> None:
     await update.message.reply_text(aviso, parse_mode="HTML")
 
 
-# ---------- CONVERSÃO DE HTML PARA O WHATSAPP ----------
-def convert_html_to_whatsapp(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"*\1*", text, flags=re.DOTALL)
-    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"_\1_", text, flags=re.DOTALL)
-    text = re.sub(r"<[^>]+>", "", text)
-    return text
-
-
-# ---------- FUNÇÕES DE ENVIO PARA O WHATSAPP ----------
-async def send_whatsapp_offer(
-    group_id: str,
-    message: str,
-    media_url: str | None = None,
-    media_type: str = "image",
-) -> bool:
-    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
-        logger.error("❌ Credenciais da Evolution API não configuradas.")
-        return False
-
-    final_message = convert_html_to_whatsapp(message)
-
-    # Se a URL for .mp4 ou o media_type for 'video', envia como vídeo
-    is_video = (media_type == "video") or (media_url and ".mp4" in media_url.lower())
-
-    try:
-        loop = asyncio.get_running_loop()
-
-        def _request():
-            headers = {"apikey": EVOLUTION_API_KEY}
-
-            if media_url:
-                try:
-                    dl_headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                    }
-                    media_resp = requests.get(media_url, headers=dl_headers, timeout=30)
-                    if media_resp.status_code == 200:
-                        url_api = f"{EVOLUTION_API_URL}/message/sendMedia/{EVOLUTION_INSTANCE}"
-                        if is_video:
-                            files = {
-                                "file": (
-                                    "oferta_video.mp4",
-                                    media_resp.content,
-                                    "video/mp4",
-                                )
-                            }
-                            data = {
-                                "number": group_id,
-                                "mediatype": "video",
-                                "caption": final_message,
-                                "fileName": "oferta_video.mp4",
-                            }
-                        else:
-                            files = {
-                                "file": (
-                                    "oferta_qualidade.jpg",
-                                    media_resp.content,
-                                    "image/jpeg",
-                                )
-                            }
-                            data = {
-                                "number": group_id,
-                                "mediatype": "image",
-                                "caption": final_message,
-                                "fileName": "oferta_qualidade.jpg",
-                            }
-
-                        res = requests.post(
-                            url_api, data=data, files=files, headers=headers, timeout=60
-                        )
-                        if res.status_code in [200, 201]:
-                            return res
-                        else:
-                            logger.warning(
-                                f"⚠️ Falha no envio de mídia ({res.text}), tentando fallback para texto..."
-                            )
-                except Exception as e:
-                    logger.warning(f"⚠️ Erro ao baixar mídia para envio: {e}")
-
-            url_api = f"{EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE}"
-            payload = {"number": group_id, "text": final_message, "delay": 1200}
-            headers["Content-Type"] = "application/json"
-            return requests.post(url_api, json=payload, headers=headers, timeout=15)
-
-        response = await loop.run_in_executor(None, _request)
-        if response.status_code in [200, 201]:
-            logger.info(
-                f"✅ Oferta ({'VÍDEO' if is_video else 'IMAGEM'}) enviada com sucesso para o WhatsApp ({group_id})"
-            )
-            return True
-        else:
-            logger.error(f"❌ Erro ao enviar para o WhatsApp: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Exceção ao enviar mensagem para o WhatsApp: {e}")
-        return False
-
-
 # ---------- FUNÇÕES DE LIMPEZA E TRATAMENTO DE TEXTO ----------
 def clean_corrupted_text(text: str) -> str:
     if not text:
@@ -282,45 +169,8 @@ def remove_affiliate_disclaimers(text: str) -> str:
     return cleaned_text.strip()
 
 
-def resolve_short_link(short_url: str) -> str:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    }
-    try:
-        session = requests.Session()
-        resp = session.get(short_url, headers=headers, allow_redirects=True, timeout=12)
-        final_url = resp.url
-
-        if "/social/" in final_url:
-            decoded_html = html.unescape(resp.text)
-            match = (
-                re.search(
-                    r'https?://(?:www\.)?mercadolivre\.com\.br/p/[^\s"\'<>]+',
-                    decoded_html,
-                )
-                or re.search(
-                    r'https?://produto\.mercadolivre\.com\.br/[^\s"\'<>]+', decoded_html
-                )
-                or re.search(
-                    r'https?://[^\s"\'<>]*mercadolivre[^\s"\'<>]*MLB-[^\s"\'<>]+',
-                    decoded_html,
-                )
-            )
-
-            if match:
-                extracted_url = match.group(0)
-                logger.info(f"🎯 Link extraído do HTML: {extracted_url}")
-                return extracted_url
-
-        return final_url
-    except Exception as e:
-        logger.error(f"Erro ao expandir link via HTTP: {e}")
-        return short_url
-
-
 # ---------- CONVERSÃO DE LINK DO MERCADO LIVRE (VIA ML_OFFER) ----------
 async def convert_mercadolivre_link(product_url: str) -> dict | None:
-    """Converte o link do Mercado Livre usando o novo motor leve e retorna todos os campos do ml_offer."""
     try:
         offer = await ml_offer.get_ml_offer(product_url)
         if not offer:
@@ -355,183 +205,27 @@ async def enqueue_ml_conversion(product_url: str) -> dict | None:
     return await future
 
 
-# ---------- API SHOPEE AFFILIATE ----------
-class ShopeeAffiliateAPI:
-    GRAPHQL_URL = "https://open-api.affiliate.shopee.com.br/graphql"
-
-    def __init__(self, app_id: str, app_secret: str):
-        self.app_id = app_id
-        self.app_secret = app_secret
-
-    def _sign(self, payload: str, timestamp: str) -> str:
-        factor = f"{self.app_id}{timestamp}{payload}{self.app_secret}"
-        return hashlib.sha256(factor.encode("utf-8")).hexdigest()
-
-    def _graphql_request(self, query: str) -> dict:
-        payload = json.dumps({"query": query})
-        timestamp = str(int(time.time()))
-        signature = self._sign(payload, timestamp)
-
-        headers = {
-            "Authorization": f"SHA256 Credential={self.app_id}, Timestamp={timestamp}, Signature={signature}",
-            "Content-Type": "application/json",
-        }
-
-        resp = requests.post(
-            self.GRAPHQL_URL,
-            data=payload.encode("utf-8"),
-            headers=headers,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        if "errors" in data:
-            logger.error(f"Erro GraphQL: {data['errors']}")
-            return {}
-        return data.get("data", {})
-
-    def get_product_offer(self, item_id: int) -> dict | None:
-        query = f"""query {{
-            productOfferV2(itemId: {item_id}) {{
-                nodes {{
-                    itemId
-                    productName
-                    priceMin
-                    priceMax
-                    priceDiscountRate
-                    ratingStar
-                    sales
-                    shopName
-                    offerLink
-                    imageUrl
-                }}
-            }}
-        }}"""
-        data = self._graphql_request(query)
-        nodes = data.get("productOfferV2", {}).get("nodes", [])
-        if nodes:
-            offer = nodes[0]
-            if "productName" in offer and offer["productName"]:
-                offer["productName"] = clean_corrupted_text(offer["productName"])
-            return offer
-        return None
-
-    def generate_short_link(self, origin_url: str) -> str:
-        safe_origin_url = json.dumps(origin_url)
-        query = f"mutation {{ generateShortLink(input: {{originUrl: {safe_origin_url}}}) {{ shortLink }} }}"
-        result = self._graphql_request(query)
-        return result.get("generateShortLink", {}).get("shortLink", "")
-
-
-# ---------- UTILITÁRIOS ----------
-def extract_item_id(url: str) -> int | None:
-    match_param = re.search(r"[?&](?:itemId|item_id)=(\d+)", url, re.IGNORECASE)
-    if match_param:
-        return int(match_param.group(1))
-
-    match_path = re.search(r"i\.\d+\.(\d+)", url) or re.search(r"-i\.\d+\.(\d+)", url)
-    if match_path:
-        return int(match_path.group(1))
-
-    match_product = re.search(r"/product/\d+/(\d+)", url) or re.search(
-        r"/sp/product/(\d+)", url
-    )
-    if match_product:
-        return int(match_product.group(1))
-
-    match_end_id = re.search(r"/(\d+)(?:\?|$)", url)
-    if match_end_id:
-        return int(match_end_id.group(1))
-
-    return None
-
-
-def generate_persuasive_copy(offer: dict, store_name: str = "Shopee") -> str:
-    discount = offer.get("priceDiscountRate")
-    rating = offer.get("ratingStar")
-    sales = offer.get("sales")
-
-    lines = ["💡 <b>POR QUE VALE A PENA?</b>"]
-
-    if discount and discount > 0:
-        lines.append(f"🔥 <b>{discount}% OFF</b> aplicado no item!\n")
-    if sales and sales > 10:
-        lines.append(f"📦 Mais de <b>{sales:,} unidades vendidas</b>!")
-    if rating and float(rating) >= 4.0:
-        lines.append(f"⭐ Avaliação: <b>{rating}/5.0</b>")
-
-    lines.append(f"\n🏪 Loja: <b>{escape_html(store_name)}</b>")
-    lines.append(
-        "\n\n🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>"
-    )
-    lines.append(
-        "\n⚠️ <b>Atenção:</b> O estoque e o preço promocional podem mudar a qualquer momento."
-    )
-    lines.append("\n👇 <b>Clique no link abaixo para garantir o seu:</b>")
-
-    return "\n".join(lines)
-
-
-def format_product_message(offer: dict, link: str, store_name: str = "Shopee") -> str:
-    name = escape_html(offer.get("productName", "Produto Incrível"))
-    price_min = offer.get("priceMin")
-    price_max = offer.get("priceMax")
-
-    msg = f"🔥 <b>{name}</b>\n\n"
-
-    if price_min:
-        p_min = float(price_min)
-        p_max = float(price_max) if price_max else p_min
-        if p_min != p_max and p_max > 0:
-            msg += (
-                f"💰 <b>Preço:</b> R$ {p_min:,.2f} - R$ {p_max:,.2f}\n\n".replace(
-                    ",", "X"
-                )
-                .replace(".", ",")
-                .replace("X", ".")
-            )
-        else:
-            msg += (
-                f"💰 <b>Preço:</b> R$ {p_min:,.2f}\n\n".replace(",", "X")
-                .replace(".", ",")
-                .replace("X", ".")
-            )
-
-    msg += generate_persuasive_copy(offer, store_name=store_name)
-    msg += f"\n👉 {link}"
-
-    return msg
-
-
-# ---------- COMANDO /gerar PARA LISTA AUTOMÁTICA SHOPEE ----------
+# ---------- COMANDO /gerar PARA LISTA AUTOMÁTICA ----------
 async def handle_gerar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    app_id = os.environ.get("SHOPEE_APP_ID")
-    app_secret = os.environ.get("SHOPEE_APP_SECRET")
-    if not app_id or not app_secret:
-        await update.message.reply_text(
-            "❌ Credenciais da API da Shopee não configuradas."
-        )
-        return
-
-    count = 15
+    count = int(get_config("auto_refill_count") or "15")
     if context.args and context.args[0].isdigit():
         count = max(1, min(50, int(context.args[0])))
 
     today_str = datetime.now(cuiaba_tz).strftime("%Y-%m-%d")
     status_msg = await update.message.reply_text(
-        f"🎲 Buscando e embaralhando <b>{count} ofertas (TOP_PERFORMING)</b> na API da Shopee...",
+        f"🎲 Buscando e selecionando <b>{count} ofertas inéditas</b>...",
         parse_mode="HTML",
     )
 
-    loop = asyncio.get_running_loop()
-    service_api = ServiceShopeeAPI(app_id, app_secret)
-    added = await loop.run_in_executor(
-        None, service_api.generate_auto_offers_to_queue, count, today_str
+    keywords_csv = get_config("auto_keywords") or ""
+    res = await asyncio.to_thread(
+        ml_auto.generate_mixed_auto_offers_to_queue, count, today_str, keywords_csv
     )
 
     await status_msg.edit_text(
-        f"✅ <b>{added} novas ofertas da Shopee</b> foram geradas de forma aleatória (sem repetir os últimos 2 dias) e inseridas direto na Fila do Portal para hoje (<b>{today_str}</b>)!",
+        f"✅ <b>{res['total_added']} novas ofertas</b> adicionadas na Fila ({today_str})!\n"
+        f"• 🟠 Shopee: <b>{res['shopee_added']}</b>\n"
+        f"• 🟡 Mercado Livre: <b>{res['ml_added']}</b>",
         parse_mode="HTML",
     )
 
@@ -542,59 +236,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw_text = update.message.text or update.message.caption or ""
 
-    shopee_links = re.findall(SHOPEE_URL_PATTERN, raw_text)
-    ml_match = re.search(ML_URL_PATTERN, raw_text)
+    shopee_links = [
+        l.rstrip(".,;:!?)\n") for l in re.findall(SHOPEE_URL_PATTERN, raw_text)
+    ]
+    ml_links = [l.rstrip(".,;:!?)\n") for l in re.findall(ML_URL_PATTERN, raw_text)]
 
-    if not shopee_links and not ml_match:
+    if not shopee_links and not ml_links:
         await update.message.reply_text(
             "👋 Nenhum link válido da Shopee ou do Mercado Livre foi encontrado na mensagem.\n"
-            "💡 Dica: Use /gerar para adicionar 15 ofertas automáticas da Shopee na fila!"
+            "💡 Dica: Use /gerar para adicionar ofertas automáticas na fila!"
         )
         return
 
     cleaned_text = remove_affiliate_disclaimers(clean_corrupted_text(raw_text))
 
-    if ml_match and not shopee_links:
-        all_ml_links = re.findall(ML_URL_PATTERN, raw_text)
-        all_ml_links = [re.sub(r"[.,;:!?)\n]+$", "", link) for link in all_ml_links]
-        if len(all_ml_links) > 1:
-            context.user_data["ml_links"] = all_ml_links
-            context.user_data["multiple_ml"] = True
-        else:
-            context.user_data["multiple_ml"] = False
-    else:
-        context.user_data["multiple_ml"] = False
-
     if shopee_links:
         context.user_data["platform"] = "shopee"
-        context.user_data["shopee_links"] = [
-            l.rstrip(".,;:!?)\n") for l in shopee_links
-        ]
-        context.user_data["raw_url"] = context.user_data["shopee_links"][-1]
+        context.user_data["shopee_links"] = shopee_links
+        context.user_data["raw_url"] = shopee_links[-1]
+        context.user_data["multiple_ml"] = False
     else:
         context.user_data["platform"] = "mercadolivre"
-        context.user_data["raw_url"] = ml_match.group(0).rstrip(".,;:!?)\n")
+        context.user_data["ml_links"] = ml_links
+        context.user_data["raw_url"] = ml_links[-1]
+        context.user_data["multiple_ml"] = len(ml_links) > 1
 
     context.user_data["raw_text"] = cleaned_text
 
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🎟️ CUPOM", callback_data="type_cupom")],
-            [InlineKeyboardButton("🏷️ OFERTA", callback_data="type_oferta")],
-            [InlineKeyboardButton("🔗 LINK", callback_data="type_link")],
+            [
+                InlineKeyboardButton(
+                    "🏷️ OFERTA (Manter Texto)", callback_data="type_oferta"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔗 LINK (Gerar Copy Automática)", callback_data="type_link"
+                )
+            ],
         ]
     )
 
     platform_name = (
         "Shopee" if context.user_data["platform"] == "shopee" else "Mercado Livre"
     )
+    qtd_links = len(shopee_links) if shopee_links else len(ml_links)
 
     await update.message.reply_text(
-        f"⚙️ <b>Link do {platform_name} identificado!</b>\n\n"
+        f"⚙️ <b>{qtd_links} Link(s) do {platform_name} identificado(s)!</b>\n\n"
         "Qual o tipo de mensagem que você deseja formatar?\n\n"
-        "• <b>CUPOM:</b> Mantém o texto idêntico e converte o link do cupom.\n"
-        "• <b>OFERTA:</b> Mantém o texto idêntico e converte o link da oferta.\n"
-        "• <b>LINK:</b> Gera uma nova cópia completa via API/Plataforma.",
+        "• <b>CUPOM:</b> Converte todos os links ou gera card especial de Central de Cupons.\n"
+        "• <b>OFERTA:</b> Mantém seu texto original e substitui cada link pelo seu respectivo link de afiliado.\n"
+        "• <b>LINK:</b> Gera copy completa via API (e inclui o link do cupom se houver mais de 1 link!).",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -616,96 +311,90 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await query.edit_message_text("⏳ Gerando seu link de afiliado...")
+    await query.edit_message_text("⏳ Convertendo link(s) para afiliado...")
     clean_base_text = remove_affiliate_disclaimers(raw_text)
 
     media_url = None
     aff_link = None
     formatted_msg = ""
+    category_tag = "Manual"
 
     # ================= MERCADO LIVRE =================
     if platform == "mercadolivre":
+        ml_links = context.user_data.get("ml_links", [raw_url])
+
         if choice == "type_cupom":
-            aff_link = ML_DEFAULT_CUPON_LINK
+            category_tag = "Cupom ML"
+            url_map = {}
+            for orig_l in ml_links:
+                try:
+                    res_link = await asyncio.to_thread(
+                        create_affiliate_link_full, orig_l
+                    )
+                    conv = res_link.get("short_url") or res_link.get("long_url")
+                    url_map[orig_l] = conv if conv else ML_DEFAULT_CUPON_LINK
+                except Exception:
+                    url_map[orig_l] = ML_DEFAULT_CUPON_LINK
+
+            aff_link = url_map.get(raw_url, ML_DEFAULT_CUPON_LINK)
 
             if clean_base_text.strip() == raw_url.strip():
-                formatted_msg = (
-                    "🎟️ <b>CUPOM DE DESCONTO</b>\n\n"
-                    f"Resgate o seu cupom no link abaixo:\n👉 {aff_link}"
+                formatted_msg = ShopeeAffiliateAPI.format_coupon_page_message(
+                    aff_link, "Mercado Livre"
                 )
             else:
-                formatted_msg = escape_html(clean_base_text).replace(
-                    escape_html(raw_url), aff_link
-                )
+                rewritten = escape_html(clean_base_text)
+                for orig_l, new_l in url_map.items():
+                    rewritten = rewritten.replace(escape_html(orig_l), new_l)
+                formatted_msg = rewritten
 
-        elif multiple_ml:
-            ml_links = context.user_data.get("ml_links", [])
-            if not ml_links:
-                await query.message.reply_text(
-                    "⚠️ Nenhum link encontrado para processar."
-                )
-                return
+        elif multiple_ml or len(ml_links) > 1:
+            url_map = {}
+            main_ml_result = None
+            coupon_ml_links = []
 
-            aff_links = []
-            for original_link in ml_links:
-                result = await enqueue_ml_conversion(original_link)
-                if result and result.get("affiliate_url"):
-                    aff_links.append(result["affiliate_url"])
+            for orig_l in ml_links:
+                res = await enqueue_ml_conversion(orig_l)
+                if res and res.get("affiliate_url"):
+                    url_map[orig_l] = res["affiliate_url"]
+                    if res.get("current_price") is not None:
+                        main_ml_result = res
+                        media_url = res.get("image_url") or media_url
+                    else:
+                        coupon_ml_links.append(res["affiliate_url"])
                 else:
-                    aff_links.append(original_link)
-
-            new_text = escape_html(clean_base_text)
-            for original, new in zip(ml_links, aff_links):
-                new_text = new_text.replace(escape_html(original), new)
-
-            free_notice = (
-                "\n\n🚚 <b>Aproveite o frete grátis e benefícios do Mercado Livre!</b>"
-            )
-            if "frete grátis" not in new_text.lower():
-                new_text += free_notice
-            formatted_msg = clean_corrupted_text(new_text)
-
-            context.user_data["last_formatted_msg"] = formatted_msg
-            context.user_data["last_media_url"] = None
-            context.user_data["last_store"] = "Mercado Livre"
-            context.user_data["last_product_url"] = raw_url
-
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "📥 Adicionar à Fila do Portal",
-                            callback_data="send_group_queue",
+                    try:
+                        res_link = await asyncio.to_thread(
+                            create_affiliate_link_full, orig_l
                         )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🚀 Enviar para Grupo Principal",
-                            callback_data="send_group_principal",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🤝 Enviar para Grupo Parceria",
-                            callback_data="send_group_parceria",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "📢 Enviar para Todos os Grupos",
-                            callback_data="send_group_all",
-                        )
-                    ],
-                ]
-            )
-            await query.message.reply_text(
-                formatted_msg, reply_markup=keyboard, parse_mode="HTML"
-            )
-            return
+                        conv = res_link.get("short_url") or orig_l
+                        url_map[orig_l] = conv
+                        coupon_ml_links.append(conv)
+                    except Exception:
+                        url_map[orig_l] = orig_l
+
+            if choice == "type_link" and main_ml_result:
+                formatted_msg = ml_offer.format_product_message(
+                    main_ml_result, main_ml_result.get("affiliate_url")
+                )
+                if coupon_ml_links:
+                    c_lines = "\n".join(
+                        f"🎟️ <b>Resgate o cupom aqui:</b> {cl}"
+                        for cl in coupon_ml_links
+                    )
+                    formatted_msg = f"{formatted_msg}\n\n{c_lines}"
+            else:
+                new_text = escape_html(clean_base_text)
+                for orig_l, new_l in url_map.items():
+                    new_text = new_text.replace(escape_html(orig_l), new_l)
+
+                free_notice = "\n\n🚚 <b>Aproveite o frete grátis e benefícios do Mercado Livre!</b>"
+                if "frete grátis" not in new_text.lower():
+                    new_text += free_notice
+                formatted_msg = new_text
 
         else:
             ml_result = await enqueue_ml_conversion(raw_url)
-
             if not ml_result:
                 await query.message.reply_text(
                     "❌ Não foi possível gerar o link de afiliado do Mercado Livre. Verifique se a sessão de login está válida."
@@ -716,7 +405,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             media_url = ml_result.get("image_url")
 
             if choice == "type_link":
-                # UMA ÚNICA LINHA, IGUAL À SHOPEE:
                 formatted_msg = ml_offer.format_product_message(ml_result, aff_link)
             else:
                 free_shipping_notice = (
@@ -730,7 +418,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
 
-    # ================= SHOPEE =================
+    # ================= SHOPEE (USANDO O SERVIÇO UNIFICADO shopee_service.py) =================
     else:
         app_id = os.environ.get("SHOPEE_APP_ID")
         app_secret = os.environ.get("SHOPEE_APP_SECRET")
@@ -742,84 +430,122 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         api = ShopeeAffiliateAPI(app_id, app_secret)
-
         shopee_links = context.user_data.get("shopee_links", [raw_url])
 
+        url_map: dict[str, str] = {}
         offer = None
         product_link = raw_url
+        product_aff_link = None
+        coupon_aff_links: list[str] = []
 
         for link in shopee_links:
-            full_url = resolve_short_link(link)
-            item_id = extract_item_id(full_url) or extract_item_id(link)
-            if item_id:
-                temp_offer = api.get_product_offer(item_id)
-                if temp_offer and temp_offer.get("imageUrl"):
-                    offer = temp_offer
-                    product_link = link
-                    break
+            full_url = await asyncio.to_thread(api.resolve_short_link, link)
+            clean_dest_url = await asyncio.to_thread(
+                api.clean_shopee_url_for_affiliate, full_url
+            )
+            item_id = api.extract_item_id(full_url) or api.extract_item_id(link)
 
-        image_url = offer.get("imageUrl") if offer else None
-        media_url = image_url
+            if item_id:
+                temp_offer = await asyncio.to_thread(api.get_product_offer, item_id)
+                if temp_offer:
+                    if temp_offer.get("productName"):
+                        temp_offer["productName"] = clean_corrupted_text(
+                            temp_offer["productName"]
+                        )
+                    offer = temp_offer
+                    product_link = clean_dest_url
+                    conv_link = (
+                        temp_offer.get("offerLink")
+                        or await asyncio.to_thread(
+                            api.generate_short_link, clean_dest_url
+                        )
+                        or link
+                    )
+                else:
+                    product_link = clean_dest_url
+                    conv_link = (
+                        await asyncio.to_thread(api.generate_short_link, clean_dest_url)
+                        or await asyncio.to_thread(api.generate_short_link, full_url)
+                        or link
+                    )
+                url_map[link] = conv_link
+                product_aff_link = conv_link
+            else:
+                conv_coupon = (
+                    await asyncio.to_thread(api.generate_short_link, clean_dest_url)
+                    or await asyncio.to_thread(api.generate_short_link, full_url)
+                    or await asyncio.to_thread(api.generate_short_link, link)
+                    or link
+                )
+                url_map[link] = conv_coupon
+                coupon_aff_links.append(conv_coupon)
+
+        media_url = offer.get("imageUrl") if offer else None
+        is_only_coupon_page = (offer is None) and (len(coupon_aff_links) > 0)
 
         if choice == "type_cupom":
-            aff_link = api.generate_short_link(product_link) or api.generate_short_link(
-                resolve_short_link(product_link)
-            )
-            if not aff_link:
-                await query.message.reply_text("❌ Erro ao converter o link de cupom.")
-                return
-
-            if clean_base_text.strip() == raw_url.strip():
-                formatted_msg = (
-                    "🎟 <b>CUPOM DE DESCONTO SHOPEE</b>\n\n"
-                    f"Resgate o seu cupom no link abaixo:\n👉 {aff_link}"
+            category_tag = "Cupom Shopee"
+            if clean_base_text.strip() in shopee_links:
+                target_aff = (
+                    coupon_aff_links[0]
+                    if coupon_aff_links
+                    else url_map.get(raw_url, raw_url)
                 )
-            else:
-                formatted_msg = escape_html(clean_base_text).replace(
-                    escape_html(raw_url), aff_link
-                )
-
-        elif choice == "type_oferta":
-            full_prod_url = resolve_short_link(product_link)
-            aff_link = api.generate_short_link(
-                full_prod_url
-            ) or api.generate_short_link(product_link)
-            if not aff_link:
-                await query.message.reply_text("❌ Erro ao converter o link de oferta.")
-                return
-
-            free_shipping_notice = "🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>"
-
-            if clean_base_text.strip() == raw_url.strip():
-                formatted_msg = (
-                    "🏷 <b>OFERTA IMPERDÍVEL SHOPEE</b>\n\n"
-                    f"{free_shipping_notice}\n\n"
-                    f"Aproveite a promoção no link abaixo:\n👉 {aff_link}"
-                )
+                formatted_msg = api.format_coupon_page_message(target_aff, "Shopee")
             else:
                 converted_text = escape_html(clean_base_text)
-                for slink in shopee_links:
-                    converted_text = converted_text.replace(
-                        escape_html(slink), aff_link
+                for orig_l, new_l in url_map.items():
+                    converted_text = converted_text.replace(escape_html(orig_l), new_l)
+                formatted_msg = converted_text
+
+        elif choice == "type_oferta":
+            category_tag = "Cupom Shopee" if is_only_coupon_page else "Manual Shopee"
+            free_shipping_notice = "🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>"
+
+            if clean_base_text.strip() in shopee_links:
+                target_aff = url_map.get(raw_url, raw_url)
+                if is_only_coupon_page:
+                    formatted_msg = api.format_coupon_page_message(target_aff, "Shopee")
+                else:
+                    formatted_msg = (
+                        "🏷 <b>OFERTA IMPERDÍVEL SHOPEE</b>\n\n"
+                        f"{free_shipping_notice}\n\n"
+                        f"Aproveite a promoção no link abaixo:\n👉 {target_aff}"
                     )
-                formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
+            else:
+                converted_text = escape_html(clean_base_text)
+                for orig_l, new_l in url_map.items():
+                    converted_text = converted_text.replace(escape_html(orig_l), new_l)
+
+                if (
+                    "frete grátis" not in converted_text.lower()
+                    and "frete gratis" not in converted_text.lower()
+                ):
+                    formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
+                else:
+                    formatted_msg = converted_text
 
         elif choice == "type_link":
-            if offer:
-                aff_link = offer.get("offerLink") or api.generate_short_link(
-                    resolve_short_link(product_link)
+            if offer and product_aff_link:
+                category_tag = "Manual Shopee"
+                formatted_msg = api.format_product_message(
+                    offer,
+                    product_aff_link,
+                    store_name="Shopee",
+                    extra_coupon_links=coupon_aff_links,
                 )
-                formatted_msg = format_product_message(offer, aff_link)
+            elif is_only_coupon_page:
+                category_tag = "Cupom Shopee"
+                formatted_msg = api.format_coupon_page_message(
+                    coupon_aff_links[0], "Shopee"
+                )
             else:
-                full_prod_url = resolve_short_link(product_link)
-                aff_link = api.generate_short_link(
-                    full_prod_url
-                ) or api.generate_short_link(product_link)
+                target_aff = url_map.get(raw_url, raw_url)
                 formatted_msg = (
                     "🔥 <b>PRODUTO EM DESTAQUE NA SHOPEE</b>\n\n"
                     "🏪 Loja: <b>Shopee</b>\n\n"
                     "🚚 <b>Aproveite os cupons de FRETE GRÁTIS aplicados na finalização do pedido!</b>\n\n"
-                    f"Confira as melhores condições de compra no link:\n👉 {aff_link}"
+                    f"Confira as melhores condições de compra no link:\n👉 {target_aff}"
                 )
 
     # --- MONTAGEM DOS BOTÕES E ENVIO ---
@@ -833,6 +559,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["last_product_url"] = (
         product_link if platform == "shopee" else raw_url
     )
+    context.user_data["last_category"] = category_tag
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -897,6 +624,7 @@ async def handle_whatsapp_dispatch(update: Update, context: ContextTypes.DEFAULT
     if choice == "send_group_queue":
         store_name = context.user_data.get("last_store", "Shopee")
         prod_url = context.user_data.get("last_product_url", "")
+        cat_tag = context.user_data.get("last_category", "Telegram Manual")
         today_str = datetime.now(cuiaba_tz).strftime("%Y-%m-%d")
 
         add_to_queue(
@@ -904,11 +632,12 @@ async def handle_whatsapp_dispatch(update: Update, context: ContextTypes.DEFAULT
             product_url=prod_url,
             message=message_text,
             media_url=media_url,
-            priority=0,
+            priority=1,
             target_date=today_str,
+            category=cat_tag,
         )
         await query.message.reply_text(
-            f"📥 <b>Adicionado com sucesso à Fila do Portal</b> para hoje (<b>{today_str}</b>)!",
+            f"📥 <b>Adicionado com sucesso à Fila do Portal</b> para hoje (<b>{today_str}</b>) na categoria <b>{cat_tag}</b>!",
             parse_mode="HTML",
         )
         return
@@ -994,7 +723,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------- CICLO DE VIDA DO BROWSER ----------
 async def on_startup(app: Application) -> None:
     load_ml_cookies()
-    headless = False
+    headless = True
     ml_state.playwright = await async_playwright().start()
     ml_state.browser = await ml_state.playwright.chromium.launch(
         headless=headless,
@@ -1006,7 +735,7 @@ async def on_startup(app: Application) -> None:
     )
     ml_state.worker_task = asyncio.create_task(ml_worker())
     logger.info(
-        f"🚀 Browser do Mercado Livre iniciado (headless={headless}) e worker da fila em execução."
+        f"🚀 Browser Playwright iniciado (headless={headless}) e worker da fila em execução."
     )
 
 
@@ -1030,7 +759,7 @@ async def on_shutdown(app: Application) -> None:
         except Exception:
             pass
 
-    logger.info("🛑 Browser do Mercado Livre encerrado.")
+    logger.info("🛑 Browser Playwright encerrado.")
 
 
 def main():
