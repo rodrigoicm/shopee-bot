@@ -177,7 +177,21 @@ def format_product_message(offer: dict, link: str | None = None) -> str:
     free_shipping = "🚚 <b>Aproveite frete grátis (conforme regras do app) e benefícios do Mercado Livre!</b>\n\n"
     cta_line = f"👇 <b>Clique no link abaixo para garantir o seu:</b>\n👉 {aff_link}"
 
-    return f"{header_title}{discount_line}{price_line}{seller_line}{free_shipping}{cta_line}"
+    base_msg = f"{header_title}{discount_line}{price_line}{seller_line}{free_shipping}{cta_line}"
+
+    # Se a Copy com IA estiver ativa nas Configurações (e não for apenas simulação dry-run), adiciona o gancho no topo!
+    if "PREVIA_SIMULACAO" not in aff_link:
+        from ai_copy_service import prepend_ai_hook_to_message
+
+        return prepend_ai_hook_to_message(
+            base_message=base_msg,
+            title=raw_title or "Produto Mercado Livre",
+            current_price=cur,
+            original_price=orig,
+            discount_pct=discount_label,
+            store="Mercado Livre",
+        )
+    return base_msg
 
 
 def preview_message(offer: dict) -> str:

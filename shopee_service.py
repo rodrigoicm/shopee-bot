@@ -464,6 +464,23 @@ class ShopeeAffiliateAPI:
             offer, store_name=store_name, extra_coupon_links=extra_coupon_links
         )
         msg += f"\n👉 {link}"
+
+        # Se a Copy com IA estiver ativa nas Configurações, adiciona o gancho único no topo!
+        from ai_copy_service import prepend_ai_hook_to_message
+
+        msg = prepend_ai_hook_to_message(
+            base_message=msg,
+            title=clean_name,
+            current_price=offer.get("priceMin"),
+            original_price=(
+                offer.get("priceMax")
+                if offer.get("priceMax") != offer.get("priceMin")
+                else None
+            ),
+            discount_pct=offer.get("priceDiscountRate"),
+            store=store_name,
+            sales=offer.get("sales"),
+        )
         return msg
 
     @staticmethod

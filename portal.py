@@ -6,6 +6,7 @@ import requests
 import time
 import logging
 import asyncio
+import ai_copy_service
 import html
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -57,6 +58,7 @@ def ensure_media_type_column():
 ensure_media_type_column()
 offer_comparator.ensure_comparator_configs()
 ml_auto.ensure_ml_auto_schema()
+ai_copy_service.ensure_ai_configs()
 
 
 def format_brl(val: float) -> str:
@@ -222,6 +224,10 @@ async def dashboard(
     start_str = configs.get("start_time", "08:00")
     end_str = configs.get("end_time", "22:00")
     in_window = start_str <= now_dt.strftime("%H:%M") <= end_str
+
+    ai_enabled = configs.get("ai_copy_enabled", "0") == "1"
+    ai_style = configs.get("ai_copy_style", "urgencia_comparativo")
+    ai_custom_prompt = configs.get("ai_copy_custom_prompt", "")
 
     if not in_window:
         timer_status_text = f"Fora do horário ({start_str}–{end_str})"
@@ -1185,6 +1191,41 @@ async def dashboard(
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Bloco 4: Inteligência Artificial (Copywriting) -->
+                        <div class="col-md-12">
+                            <div class="card shadow-sm border-info">
+                                <div class="card-header bg-info text-dark fw-bold">🤖 4. Copywriting com Inteligência Artificial (Google Gemini)</div>
+                                <div class="card-body">
+                                    <form action="/update-ai-config" method="POST" class="row g-3">
+                                        <div class="col-md-12">
+                                            <div class="form-check form-switch p-3 bg-info-subtle border border-info rounded">
+                                                <input class="form-check-input ms-0 me-2" type="checkbox" name="ai_copy_enabled" value="1" id="aiCopySwitch" {"checked" if ai_enabled else ""}>
+                                                <label class="form-check-label fw-bold" for="aiCopySwitch">
+                                                    ✨ Ativar Geração de Chamada Persuasiva com IA no Topo das Ofertas
+                                                </label>
+                                                <div class="small text-muted">Requer <code>GEMINI_API_KEY</code> configurada no arquivo <code>.env</code>.</div>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-5">
+                                            <label class="form-label small fw-bold">Estilo da Chamada (Tom de Voz)</label>
+                                            <select name="ai_copy_style" class="form-select form-select-sm">
+                                                <option value="urgencia_comparativo" {"selected" if ai_style == "urgencia_comparativo" else ""}>🚨 Urgência + Comparativo com Outras Lojas</option>
+                                                <option value="calculo_unitario" {"selected" if ai_style == "calculo_unitario" else ""}>🧮 Foco em Preço por Unidade (Kits/Fraldas) + Economia</option>
+                                                <option value="achadinho_amigavel" {"selected" if ai_style == "achadinho_amigavel" else ""}>😍 Achadinho VIP / Recomendação Amigável</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-7">
+                                            <label class="form-label small fw-bold">Instrução Extra para a IA (Opcional)</label>
+                                            <input type="text" name="ai_copy_custom_prompt" value="{html.escape(ai_custom_prompt)}" placeholder="Ex: Use gírias leves, cite que a entrega é rápida..." class="form-control form-control-sm">
+                                        </div>
+                                        <div class="col-md-12">
+                                            <button type="submit" class="btn btn-info fw-bold w-100">💾 Salvar Configurações de IA</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1462,6 +1503,18 @@ async def update_parameters(
     update_config("shopee_target_categories", shopee_target_categories.strip())
     update_config("auto_keywords", auto_keywords.strip())
     update_config("auto_refill_enabled", "1" if auto_refill_enabled == "1" else "0")
+    return RedirectResponse(url="/?tab=config&saved_cfg=1", status_code=303)
+
+
+@app.post("/update-ai-config")
+async def update_ai_config(
+    ai_copy_enabled: str = Form(None),
+    ai_copy_style: str = Form("urgencia_comparativo"),
+    ai_copy_custom_prompt: str = Form(""),
+):
+    update_config("ai_copy_enabled", "1" if ai_copy_enabled == "1" else "0")
+    update_config("ai_copy_style", ai_copy_style.strip())
+    update_config("ai_copy_custom_prompt", ai_copy_custom_prompt.strip())
     return RedirectResponse(url="/?tab=config&saved_cfg=1", status_code=303)
 
 
