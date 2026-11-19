@@ -1,0 +1,135 @@
+2026-11-13 15:58:10 | INFO    | ===========================================================================
+2026-11-13 15:58:10 | INFO    | 🧪 INICIANDO LABORATÓRIO DE MÍDIA WHATSAPP (EVOLUTION API)
+2026-11-13 15:58:10 | INFO    | 📡 API URL      : http://localhost:8080
+2026-11-13 15:58:10 | INFO    | 📱 Instância    : chip_01
+2026-11-13 15:58:10 | INFO    | 🎯 Destino Teste: 5565984590135
+2026-11-13 15:58:10 | INFO    | 🖼️ Pillow Ativo : True
+2026-11-13 15:58:10 | INFO    | ===========================================================================
+2026-11-13 15:58:10 | INFO    | ---------------------------------------------------------------------------
+2026-11-13 15:58:10 | INFO    | 🚀 INICIANDO BATERIA DE TESTES PARA: URL Manual
+2026-11-13 15:58:10 | INFO    | 🔗 URL Original   : https://shopee.com.br/product/350141716/22193933215
+2026-11-13 15:58:12 | ERROR   | ❌ Pillow falhou ao abrir os bytes baixados: cannot identify image file <_io.BytesIO object at 0x0000020D34D254E0>
+2026-11-13 15:58:12 | INFO    | 📥 Download HTTP 200 em 1290.2ms | Tamanho: 152.15 kB
+2026-11-13 15:58:12 | INFO    | 🔍 Header Content-Type: 'text/html; charset=utf-8' | Assinatura Binária: OUTRO (Hex inicial: 3C21646F63747970)
+2026-11-13 15:58:12 | INFO    | 📐 Pillow Info: format=None, mode=None, dim=NonexNone, progressive=False
+2026-11-13 15:58:13 | INFO    | 📤 [MODO 1: URL Direta no JSON] Status HTTP Evolution: 500
+2026-11-13 15:58:13 | INFO    | ✅ [MODO 1: URL Direta no JSON] Retorno Baileys -> jpegThumbnail GERADO? False | width=None, height=None, fileLength=None
+2026-11-13 15:58:13 | DEBUG   | 📄 [MODO 1: URL Direta no JSON] JSON Completo da Resposta: {"status": 500, "error": "Internal Server Error", "response": {"message": ["Error: Input buffer has corrupt header: glib: XML parse error: Error domain 1 code 68 on line 1 column 2 of data: StartTag: invalid element name"]}}
+2026-11-13 16:01:12 | INFO    | ===========================================================================
+2026-11-13 16:01:12 | INFO    | 🧪 INICIANDO LABORATÓRIO DE MÍDIA WHATSAPP (EVOLUTION API)
+2026-11-13 16:01:12 | INFO    | 📡 API URL      : http://localhost:8080
+2026-11-13 16:01:12 | INFO    | 📱 Instância    : chip_01
+2026-11-13 16:01:12 | INFO    | 🎯 Destino Teste: 5565984590135
+2026-11-13 16:01:12 | INFO    | 🖼️ Pillow Ativo : True
+2026-11-13 16:01:12 | INFO    | ===========================================================================
+2026-11-13 16:01:12 | INFO    | ---------------------------------------------------------------------------
+2026-11-13 16:01:12 | INFO    | 📦 Produto encontrado no database.db (Oferta #980 - Shopee)! Usando media_url salva: https://cf.shopee.com.br/file/br-11134207-81z1k-mflgq6cwipz8df
+2026-11-13 16:01:12 | INFO    | 🚀 INICIANDO BATERIA DE TESTES PARA: Oferta #980 (Shopee) do Banco
+2026-11-13 16:01:12 | INFO    | 🔗 URL da Imagem Original   : https://cf.shopee.com.br/file/br-11134207-81z1k-mflgq6cwipz8df
+2026-11-13 16:01:13 | INFO    | 📥 Download HTTP 200 em 839.6ms | Tamanho: 1054.16 kB
+2026-11-13 16:01:13 | INFO    | 🔍 Header Content-Type: 'image/jpeg' | Assinatura Binária: JPEG (Magic: FF D8 FF)
+2026-11-13 16:01:13 | INFO    | 📐 Pillow Info: format=JPEG, mode=RGB, dim=1024x1024, progressive=False
+2026-11-13 16:01:16 | INFO    | 📤 [MODO 1: URL Direta no JSON] Status HTTP Evolution: 201
+2026-11-13 16:01:16 | INFO    | ✅ [MODO 1: URL Direta no JSON] Retorno Baileys -> jpegThumbnail GERADO? True (len=16839) | width=1024, height=1024, fileLength={'low': 77132, 'high': 0, 'unsigned': True}
+2026-11-13 16:01:16 | DEBUG   | 📄 [MODO 1: URL Direta no JSON] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0E32E7948CD3D91EFDD"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m231/AQN5lJ0tLRTVD2OLjYnUbleN3NzH6hOEK9rIN0vKcJMYZ2WOjN3uNr2RxW4RLSi_3ju9HwFUZdzhRuEwgVyB0HcXFS_WpA8CRtmqYE2kpQ?ccb=9-4&oh=01_Q5Aa6AF85516QIYs2fRAFl-Qf5YfjufO_g0aSGPRKcDNsmy0ug&oe=6B1EEF79&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 1: URL Direta]*\n📋 *Oferta #980 (Shopee) do Banco*\n
+2026-11-13 16:01:21 | INFO    | 🔄 Convertido p/ JPEG (Original 1024x1024) | Novo tamanho: 198.5 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:01:22 | INFO    | 📤 [MODO 2: Base64 JPEG (Dimensão Original)] Status HTTP Evolution: 201
+2026-11-13 16:01:22 | INFO    | ✅ [MODO 2: Base64 JPEG (Dimensão Original)] Retorno Baileys -> jpegThumbnail GERADO? True (len=16906) | width=1024, height=1024, fileLength={'low': 79189, 'high': 0, 'unsigned': True}
+2026-11-13 16:01:22 | DEBUG   | 📄 [MODO 2: Base64 JPEG (Dimensão Original)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0D06B7D16DC73A443A8"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m233/AQP6Ld9WVpn30O-zJdKqDAl5ppYtB-lIOtpMs69k-W4mliEwX-V-ivZjKLiAuekkJH3aEHrZXr34jPfOmAZC2R1Y2QFd_ku1-ZMDSEwUQQ?ccb=9-4&oh=01_Q5Aa6AFt_EtHhZmTIzu4C4KMHVrHqMtSAvTM6POOwAPWJxEQpw&oe=6B1ED0CA&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 2: Base64 JPEG Dimensão Original]*\n📋 *Oferta #980 (
+2026-11-13 16:01:27 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 116.39 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:01:29 | INFO    | 📤 [MODO 3: Base64 JPEG (Quadrado 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:01:29 | INFO    | ✅ [MODO 3: Base64 JPEG (Quadrado 800x800)] Retorno Baileys -> jpegThumbnail GERADO? True (len=16982) | width=800, height=800, fileLength={'low': 49015, 'high': 0, 'unsigned': True}
+2026-11-13 16:01:29 | DEBUG   | 📄 [MODO 3: Base64 JPEG (Quadrado 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB03803DF2EB94E9F7715"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m235/AQPdkPCtW_a1TWeLPBjzsgPl5LI1IR1wkfg61rANT1UCefFJYGC4VRr1tpAwck1JqV8-8S2iHA2EJjTzl41Ff-7-E4FxAy6CD16FFhLHzA?ccb=9-4&oh=01_Q5Aa6AGvdBu3wlFKPGkmUN2ilffFHb1okR4t-p5iMztD5NN1KQ&oe=6B1ED981&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 3: Base64 JPEG Quadrado 800x800]*\n📋 *Oferta #980 (S
+2026-11-13 16:01:34 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 116.39 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:01:36 | INFO    | 📤 [MODO 4: Multipart File (JPEG 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:01:36 | INFO    | ✅ [MODO 4: Multipart File (JPEG 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 49015, 'high': 0, 'unsigned': True}
+2026-11-13 16:01:36 | DEBUG   | 📄 [MODO 4: Multipart File (JPEG 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0CE81CCF8C6758011C3"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m233/AQOm2nQ37doby9kICxuI5DRXS6qS93IIY_XTZyhw3ALbPC3JC5SRVYf0CfXDMrdxoSsNKf4a6iim77X_BPosSzNIfUD0NQADNv9vhdiuxQ?ccb=9-4&oh=01_Q5Aa6AE1SyS4VemL0vFfyc0GLgrnEBd7NtKoFB68TGy_WQugTw&oe=6B1EF5FD&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 4: Multipart Binário 800x800]*\n📋 *Oferta #980 (Shop
+2026-11-13 16:01:36 | INFO    | 🏁 Bateria concluída! Verifique no WhatsApp quais modos geraram miniatura e confira o media_lab.log.
+2026-11-13 16:05:11 | INFO    | ===========================================================================
+2026-11-13 16:05:11 | INFO    | 🧪 INICIANDO LABORATÓRIO DE MÍDIA WHATSAPP (EVOLUTION API)
+2026-11-13 16:05:11 | INFO    | 📡 API URL      : http://localhost:8080
+2026-11-13 16:05:11 | INFO    | 📱 Instância    : chip_01
+2026-11-13 16:05:11 | INFO    | 🎯 Destino Teste: 5565984590135
+2026-11-13 16:05:11 | INFO    | 🖼️ Pillow Ativo : True
+2026-11-13 16:05:11 | INFO    | ===========================================================================
+2026-11-13 16:05:11 | INFO    | ---------------------------------------------------------------------------
+2026-11-13 16:05:11 | INFO    | 🚀 INICIANDO BATERIA DE TESTES PARA: Oferta #950 (Mercado Livre)
+2026-11-13 16:05:11 | INFO    | 🔗 URL da Imagem Original   : https://http2.mlstatic.com/D_NQ_NP_2X_960337-MLA111724818522_062026-F.jpg
+2026-11-13 16:05:12 | INFO    | 📥 Download HTTP 200 em 798.9ms | Tamanho: 137.33 kB
+2026-11-13 16:05:12 | INFO    | 🔍 Header Content-Type: 'image/jpeg' | Assinatura Binária: JPEG (Magic: FF D8 FF)
+2026-11-13 16:05:12 | INFO    | 📐 Pillow Info: format=JPEG, mode=RGB, dim=690x1200, progressive=True
+2026-11-13 16:05:14 | INFO    | 📤 [MODO 1: URL Direta no JSON] Status HTTP Evolution: 201
+2026-11-13 16:05:14 | INFO    | ✅ [MODO 1: URL Direta no JSON] Retorno Baileys -> jpegThumbnail GERADO? True (len=35890) | width=690, height=1200, fileLength={'low': 74518, 'high': 0, 'unsigned': True}
+2026-11-13 16:05:14 | DEBUG   | 📄 [MODO 1: URL Direta no JSON] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0895BF836EDAA82AA00"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m232/AQNjZYeYTLaIbTKI2s_S6a_f-SFVsotJtDp4lsKZBQJ-1euyt7tE8bjWI9Dn8ocY1GxCfnXiB3nkFRxFJKmrWV96CXDW0cVaDPGf3ntSug?ccb=9-4&oh=01_Q5Aa6AEVx4maVIoPv1l6Bb_PICrRm-JuOceyh4kjbEzdYT7nuA&oe=6B1EC5F6&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 1: URL Direta]*\n📋 *Oferta #950 (Mercado Livre)*\n• 
+2026-11-13 16:05:19 | INFO    | 🔄 Convertido p/ JPEG (Original 690x1200) | Novo tamanho: 140.24 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:05:20 | INFO    | 📤 [MODO 2: Base64 JPEG (Dimensão Original)] Status HTTP Evolution: 201
+2026-11-13 16:05:20 | INFO    | ✅ [MODO 2: Base64 JPEG (Dimensão Original)] Retorno Baileys -> jpegThumbnail GERADO? True (len=35981) | width=690, height=1200, fileLength={'low': 74645, 'high': 0, 'unsigned': True}
+2026-11-13 16:05:20 | DEBUG   | 📄 [MODO 2: Base64 JPEG (Dimensão Original)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB09338653D0688166A32"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m234/AQP5UjbBdwL3BVJR3yFLsnVvGK9fkr-Hliv_vyW9yqA29ncf-6jYD3VmnkjTP_soagZYD2ic-L6CuTfkhRotQFiH-M_JYks_PMSl-Gw0WQ?ccb=9-4&oh=01_Q5Aa6AGGhQRTH7mg-dwS5dQMmdc4nOX832NxwuRB-OHjFJKXow&oe=6B1EEB83&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 2: Base64 JPEG Dimensão Original]*\n📋 *Oferta #950 (
+2026-11-13 16:05:26 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 88.59 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:05:27 | INFO    | 📤 [MODO 3: Base64 JPEG (Quadrado 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:05:27 | INFO    | ✅ [MODO 3: Base64 JPEG (Quadrado 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 44835, 'high': 0, 'unsigned': True}
+2026-11-13 16:05:27 | DEBUG   | 📄 [MODO 3: Base64 JPEG (Quadrado 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0C070401848C3C4D2BC"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m231/AQPCN3Qtca0AXZ4KNebf9i5tES5Vhcn03MC4ftNguG6xWzjDp-xx3-WeoHU4aMVN_LHH55sDhVctQMVu9Om6wKbWxMglh58_eZebxNAM3w?ccb=9-4&oh=01_Q5Aa6AENZ4VEyKvhMupwSPSZqlcu7ZZikQN-T629dgRAPdz0-A&oe=6B1EF5ED&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 3: Base64 JPEG Quadrado 800x800]*\n📋 *Oferta #950 (M
+2026-11-13 16:05:32 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 88.59 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:05:34 | INFO    | 📤 [MODO 4: Multipart File (JPEG 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:05:34 | INFO    | ✅ [MODO 4: Multipart File (JPEG 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 44835, 'high': 0, 'unsigned': True}
+2026-11-13 16:05:34 | DEBUG   | 📄 [MODO 4: Multipart File (JPEG 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0548E1970B9B4F2BC82"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m232/AQNTy8p42qTSiPKMNyK37ol2xRgNSAFbbqbmbYFWwhiOc29PBTktM5JzTQT-NCooDDm7Jytq6UM9RJrcrn3sMC_5kANoa3bZpINDpZQNOw?ccb=9-4&oh=01_Q5Aa6AH4ScymXTFqv51VLfCPtDUgdrws_1QHRvkwVRNSb8sStQ&oe=6B1EF4DB&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 4: Multipart Binário 800x800]*\n📋 *Oferta #950 (Merc
+2026-11-13 16:05:34 | INFO    | 🏁 Bateria concluída! Verifique no WhatsApp quais modos geraram miniatura e confira o media_lab.log.
+2026-11-13 16:07:03 | INFO    | ===========================================================================
+2026-11-13 16:07:03 | INFO    | 🧪 INICIANDO LABORATÓRIO DE MÍDIA WHATSAPP (EVOLUTION API)
+2026-11-13 16:07:03 | INFO    | 📡 API URL      : http://localhost:8080
+2026-11-13 16:07:03 | INFO    | 📱 Instância    : chip_01
+2026-11-13 16:07:03 | INFO    | 🎯 Destino Teste: 5565984590135
+2026-11-13 16:07:03 | INFO    | 🖼️ Pillow Ativo : True
+2026-11-13 16:07:03 | INFO    | ===========================================================================
+2026-11-13 16:07:03 | INFO    | ---------------------------------------------------------------------------
+2026-11-13 16:07:03 | INFO    | 📦 Produto encontrado no database.db (Oferta #969 - Mercado Livre)! Usando media_url salva: https://http2.mlstatic.com/D_NQ_NP_2X_776983-MLB120081069293_102026-F.jpg
+2026-11-13 16:07:03 | INFO    | 🚀 INICIANDO BATERIA DE TESTES PARA: Oferta #969 (Mercado Livre) do Banco
+2026-11-13 16:07:03 | INFO    | 🔗 URL da Imagem Original   : https://http2.mlstatic.com/D_NQ_NP_2X_776983-MLB120081069293_102026-F.jpg
+2026-11-13 16:07:04 | INFO    | 📥 Download HTTP 200 em 731.3ms | Tamanho: 156.66 kB
+2026-11-13 16:07:04 | INFO    | 🔍 Header Content-Type: 'image/jpeg' | Assinatura Binária: JPEG (Magic: FF D8 FF)
+2026-11-13 16:07:04 | INFO    | 📐 Pillow Info: format=JPEG, mode=RGB, dim=1200x566, progressive=True
+2026-11-13 16:07:06 | INFO    | 📤 [MODO 1: URL Direta no JSON] Status HTTP Evolution: 201
+2026-11-13 16:07:06 | INFO    | ✅ [MODO 1: URL Direta no JSON] Retorno Baileys -> jpegThumbnail GERADO? True (len=13294) | width=1200, height=566, fileLength={'low': 93491, 'high': 0, 'unsigned': True}
+2026-11-13 16:07:06 | DEBUG   | 📄 [MODO 1: URL Direta no JSON] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB011F9EC8E596C886E6C"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m628/AQPtC2XOywNV5pSw0SwJwI56VWy3U4pQyBeKWXHFa8kxaZPviaBrSNHCfBzjYt8AwRUBhqwwD-XLRugCjEojxDiygR5fMi1ETAEKtALbew?ccb=9-4&oh=01_Q5Aa6AEQNhJJWPPbPUAA6bOvzmXwmZJDht3vB2OuqotLVZHmkg&oe=6B1EDC12&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 1: URL Direta]*\n📋 *Oferta #969 (Mercado Livre) do B
+2026-11-13 16:07:11 | INFO    | 🔄 Convertido p/ JPEG (Original 1200x566) | Novo tamanho: 164.43 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:07:13 | INFO    | 📤 [MODO 2: Base64 JPEG (Dimensão Original)] Status HTTP Evolution: 201
+2026-11-13 16:07:13 | INFO    | ✅ [MODO 2: Base64 JPEG (Dimensão Original)] Retorno Baileys -> jpegThumbnail GERADO? True (len=13242) | width=1200, height=566, fileLength={'low': 93500, 'high': 0, 'unsigned': True}
+2026-11-13 16:07:13 | DEBUG   | 📄 [MODO 2: Base64 JPEG (Dimensão Original)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB021723F0CF37C0550FD"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m233/AQP1NZ9Czo-_yjsG-WgZ7KqeLt5y-o21FVNLNfI7b1zZ8_m1xeR451UvjPiDGT3FNA4XDJyQgAt4n-_jR04NWfq5Flrrp5rFvCgjP9Sarg?ccb=9-4&oh=01_Q5Aa6AECdjeYa2VTKN1-i2pchMjyTXKAJTB7C4nnobsybmIUaw&oe=6B1ECDA3&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 2: Base64 JPEG Dimensão Original]*\n📋 *Oferta #969 (
+2026-11-13 16:07:18 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 86.4 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:07:19 | INFO    | 📤 [MODO 3: Base64 JPEG (Quadrado 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:07:19 | INFO    | ✅ [MODO 3: Base64 JPEG (Quadrado 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 48175, 'high': 0, 'unsigned': True}
+2026-11-13 16:07:19 | DEBUG   | 📄 [MODO 3: Base64 JPEG (Quadrado 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0476B32531A5977754F"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m269/AQPg9HdQ_0X4mNDsdr-dDQFvnSDbvPWtNq7NnuOsZ23zQ7jWB79eOG-AAIER8i2A4V-PKkVBC-rtPU_xGpTDrpS-wndqvz3tjjj2w34Qwg?ccb=9-4&oh=01_Q5Aa6AFEKIaiTOeuncynRB2vNqdzThYjowvxwHxDI48vpZwRPA&oe=6B1EF2CF&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 3: Base64 JPEG Quadrado 800x800]*\n📋 *Oferta #969 (M
+2026-11-13 16:07:24 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 86.4 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:07:26 | INFO    | 📤 [MODO 4: Multipart File (JPEG 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:07:26 | INFO    | ✅ [MODO 4: Multipart File (JPEG 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 48175, 'high': 0, 'unsigned': True}
+2026-11-13 16:07:26 | DEBUG   | 📄 [MODO 4: Multipart File (JPEG 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB08B77B2A5A704AB12E7"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m232/AQNmNf99T0_6kHhT8AAcsLpm7uD8XpTk1hFOmDsNjCjPy0Y_NLIDol7Zemr_8ukfufPaC2NfSzPLfOMCCiaU0PEqFab_wYiP_P7CmWykPg?ccb=9-4&oh=01_Q5Aa6AGzcMp92fwLk16QvcKHdxqO9Q2-FoHmKhMV3FsG0uixgQ&oe=6B1EDEC2&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 4: Multipart Binário 800x800]*\n📋 *Oferta #969 (Merc
+2026-11-13 16:07:26 | INFO    | 🏁 Bateria concluída! Verifique no WhatsApp quais modos geraram miniatura e confira o media_lab.log.
+2026-11-13 16:11:11 | INFO    | ===========================================================================
+2026-11-13 16:11:11 | INFO    | 🧪 INICIANDO LABORATÓRIO DE MÍDIA WHATSAPP (EVOLUTION API)
+2026-11-13 16:11:11 | INFO    | 📡 API URL      : http://localhost:8080
+2026-11-13 16:11:11 | INFO    | 📱 Instância    : chip_01
+2026-11-13 16:11:11 | INFO    | 🎯 Destino Teste: 5565984590135
+2026-11-13 16:11:11 | INFO    | 🖼️ Pillow Ativo : True
+2026-11-13 16:11:11 | INFO    | ===========================================================================
+2026-11-13 16:11:11 | INFO    | ---------------------------------------------------------------------------
+2026-11-13 16:11:11 | INFO    | 🚀 INICIANDO BATERIA DE TESTES PARA: Oferta #944 (Shopee)
+2026-11-13 16:11:11 | INFO    | 🔗 URL da Imagem Original   : https://cf.shopee.com.br/file/br-11134207-7r98o-m7mmyxd3wnmcd8
+2026-11-13 16:11:12 | INFO    | 📥 Download HTTP 200 em 843.9ms | Tamanho: 511.53 kB
+2026-11-13 16:11:12 | INFO    | 🔍 Header Content-Type: 'image/jpeg' | Assinatura Binária: JPEG (Magic: FF D8 FF)
+2026-11-13 16:11:12 | INFO    | 📐 Pillow Info: format=JPEG, mode=RGB, dim=900x900, progressive=False
+2026-11-13 16:11:14 | INFO    | 📤 [MODO 1: URL Direta no JSON] Status HTTP Evolution: 201
+2026-11-13 16:11:14 | INFO    | ✅ [MODO 1: URL Direta no JSON] Retorno Baileys -> jpegThumbnail GERADO? True (len=21976) | width=900, height=900, fileLength={'low': 70785, 'high': 0, 'unsigned': True}
+2026-11-13 16:11:14 | DEBUG   | 📄 [MODO 1: URL Direta no JSON] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB0587972C3884FCCDC2F"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m269/AQMikmGy-v0Exsy5uRxPGLgzJdIkN9TrLGcHEt5ay0TGyTVCzueW42e-QREqL5OI_mq42mG8ZnDOhk5tPr9D72bEkZJUIhJzTUrNw83AVA?ccb=9-4&oh=01_Q5Aa6AGSI_mMHGIlk53NJS-ac5Bxk3YSbnP6qlqokVRHXKhaIw&oe=6B1ED457&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 1: URL Direta]*\n📋 *Oferta #944 (Shopee)*\n• Origem:
+2026-11-13 16:11:19 | INFO    | 🔄 Convertido p/ JPEG (Original 900x900) | Novo tamanho: 134.69 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:11:20 | INFO    | 📤 [MODO 2: Base64 JPEG (Dimensão Original)] Status HTTP Evolution: 201
+2026-11-13 16:11:20 | INFO    | ✅ [MODO 2: Base64 JPEG (Dimensão Original)] Retorno Baileys -> jpegThumbnail GERADO? True (len=21990) | width=900, height=900, fileLength={'low': 70904, 'high': 0, 'unsigned': True}
+2026-11-13 16:11:20 | DEBUG   | 📄 [MODO 2: Base64 JPEG (Dimensão Original)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB03F67B61C0CC4F78FAE"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m234/AQNA1-0c4f5GWLA82yVpu8LYqtN2CmWivCy_rklUWHe_v8si5GRrinXpXjgd0xGjcAmBDjcezf2TMNYTWbOhmsz4ZS9uh0DsDi4Tv_q9pg?ccb=9-4&oh=01_Q5Aa6AGnUacFCxhL3kU-uBAESikMsqHzYph2VGU2DAM8xFqumg&oe=6B1EE244&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 2: Base64 JPEG Dimensão Original]*\n📋 *Oferta #944 (
+2026-11-13 16:11:26 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 114.6 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:11:27 | INFO    | 📤 [MODO 3: Base64 JPEG (Quadrado 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:11:27 | INFO    | ✅ [MODO 3: Base64 JPEG (Quadrado 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 60106, 'high': 0, 'unsigned': True}
+2026-11-13 16:11:27 | DEBUG   | 📄 [MODO 3: Base64 JPEG (Quadrado 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB022EA9BB6919E812920"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m269/AQN2vImvfKM-AOWB-zk4HC38VZEwVO6S9eMHxtaZO-oK0dwTAGXoWL-YBapVjSBfsR1A3zICQeTt1wjXovE0lAFNmuUnglwugRKg82_Kww?ccb=9-4&oh=01_Q5Aa6AFHO6PrBQ76njt6oud9-1oC-ZZEeq7XLQHP9G-E8un0dg&oe=6B1ED0FA&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 3: Base64 JPEG Quadrado 800x800]*\n📋 *Oferta #944 (S
+2026-11-13 16:11:32 | INFO    | 🔄 Convertido p/ JPEG (Canvas 800x800) | Novo tamanho: 114.6 kB | Magic: JPEG (Magic: FF D8 FF)
+2026-11-13 16:11:34 | INFO    | 📤 [MODO 4: Multipart File (JPEG 800x800)] Status HTTP Evolution: 201
+2026-11-13 16:11:34 | INFO    | ✅ [MODO 4: Multipart File (JPEG 800x800)] Retorno Baileys -> jpegThumbnail GERADO? False (len=0) | width=None, height=None, fileLength={'low': 60106, 'high': 0, 'unsigned': True}
+2026-11-13 16:11:34 | DEBUG   | 📄 [MODO 4: Multipart File (JPEG 800x800)] JSON Resposta: {"key": {"remoteJid": "556584590135@s.whatsapp.net", "fromMe": true, "id": "3EB035ADA470EA9707D671"}, "pushName": "Você", "status": "PENDING", "message": {"imageMessage": {"interactiveAnnotations": [], "scanLengths": [], "annotations": [], "url": "https://mmg.whatsapp.net/o1/v/t24/f2/m628/AQNfsPd4etm8nM7BbjT10Y1sTvTiHBIxgCjrw84iSiv7bCUVwMppA2n1Xxt_tzau7i_Mv6hPUriMRAzk-uRIhixP0t3qiLktQ_ppl26-dQ?ccb=9-4&oh=01_Q5Aa6AGsrwXdATizTuAzgDL4-NZm49skCCJ1WGoXeJUOFc0XLg&oe=6B1ED465&_nc_sid=e6ed6c&mms3=true", "mimetype": "image/jpeg", "caption": "🧪 *[MODO 4: Multipart Binário 800x800]*\n📋 *Oferta #944 (Shop
+2026-11-13 16:11:34 | INFO    | 🏁 Bateria concluída! Verifique no WhatsApp quais modos geraram miniatura e confira o media_lab.log.

@@ -1,6 +1,6 @@
 """
-Motor de Busca Automática e Laboratório de Validação do Mercado Livre
-(Mais Vendidos + Ofertas < R$ 100) e Orquestrador de Mesclagem (60% Shopee / 40% ML).
+Motor de Busca Automática e Laboratório de Validação do Mercado Livre.
+100% parametrizado via banco de dados (Portal Web) — sem filtros fixos no código.
 """
 
 import html as html_lib
@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from database import DB_NAME, add_to_queue, get_config, update_config
 from ml_affiliate import clean_url, create_affiliate_link_full
+from ml_social import build_ml_image_url
 import ml_offer
 import offer_comparator
 from shopee_service import ShopeeAffiliateAPI
@@ -27,12 +28,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 CUIABA_TZ = timezone(timedelta(hours=-4))
-
-DEFAULT_ML_MAIS_VENDIDOS_URL = "https://www.mercadolivre.com.br/mais-vendidos"
-DEFAULT_ML_OFERTAS_URL = (
-    "https://www.mercadolivre.com.br/ofertas"
-    "?container_id=MLB779362-1&price=0.0-100.0"
-)
 
 KNOWN_ML_CATEGORIES = [
     "Games",
@@ -63,7 +58,7 @@ KNOWN_ML_CATEGORIES = [
 
 
 def ensure_ml_auto_schema() -> None:
-    """Garante a tabela ml_history e as chaves de configuração do Mercado Livre."""
+    """Garante a tabela ml_history e inicializa as configurações no banco (editáveis no Portal)."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
@@ -79,13 +74,22 @@ def ensure_ml_auto_schema() -> None:
         """)
 
     defaults = {
-        "ml_auto_enabled": "0",  # 0 = Só Shopee no auto-refill (até validar no Laboratório); 1 = Mix 60/40 ativo
-        "mix_shopee_pct": "60",  # 60% Shopee / 40% Mercado Livre
-        "ml_best_sellers_pct": "30",  # 30% Mais Vendidos / 70% Ofertas (< R$ 100)
-        "ml_history_days": "7",  # Não repetir produtos do ML em 7 dias
+        "ml_auto_enabled": "0",
+        "mix_shopee_pct": "60",
+        "ml_best_sellers_pct": "30",
+        "ml_history_days": "7",
         "ml_excluded_categories_bestsellers": "Games, Informática",
         "ml_excluded_categories_offers": "",
-        "ml_offers_url": DEFAULT_ML_OFERTAS_URL,
+        "ml_bestsellers_url": "https://www.mercadolivre.com.br/mais-vendidos",
+        "ml_offers_url": (
+            "https://www.mercadolivre.com.br/ofertas?promotion_type=lightning\n"
+            "https://www.mercadolivre.com.br/ofertas"
+        ),
+        "ml_min_price": "20",
+        "ml_max_price": "350",
+        "ml_min_discount": "12",
+        "ml_pages_per_run": "4",
+        "ml_max_page_pool": "15",
     }
 
     for k, v in defaults.items():
@@ -101,7 +105,6 @@ ensure_ml_auto_schema()
 
 
 def _build_ml_headers() -> dict:
-    """Monta os headers HTTP incluindo o cookie de sessão do .env para evitar bloqueios/páginas vazias."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -137,7 +140,7 @@ def _normalize_text(text: str) -> str:
 def parse_csv_list(raw_csv: str | None) -> list[str]:
     if not raw_csv:
         return []
-    return [item.strip() for item in raw_csv.split(",") if item.strip()]
+    return [item.strip() for item in re.split(r"[,;\n]+", raw_csv) if item.strip()]
 
 
 def extract_ml_item_key(url: str, metadata: dict | None = None) -> str:
@@ -165,8 +168,119 @@ def extract_ml_item_key(url: str, metadata: dict | None = None) -> str:
     return clean_url(url)
 
 
+def _extract_product_core_signature(title: str) -> str:
+    """
+    Extrai as 4 primeiras palavras substantivas do título (ignorando voltagem, cor e medidas)
+    para barrar o mesmo produto anunciado por vendedores diferentes ou em variações 110v/220v.
+    """
+    norm = _normalize_text(title)
+    norm = re.sub(r"\b\d+(?:ml|l|g|kg|w|v|cm|mm|m|un|pcs|pecas|x|bivolt)\b", " ", norm)
+    norm = re.sub(r"[^a-z0-9\s]", " ", norm)
+    stopwords = {
+        "kit",
+        "com",
+        "para",
+        "por",
+        "mais",
+        "super",
+        "oferta",
+        "original",
+        "novo",
+        "nova",
+        "promocao",
+        "barato",
+        "envio",
+        "full",
+        "rapido",
+        "preto",
+        "branco",
+        "azul",
+        "rosa",
+        "vermelho",
+        "cinza",
+        "inox",
+        "bivolt",
+        "110v",
+        "220v",
+        "127v",
+        "masculino",
+        "feminino",
+        "unissex",
+        "de",
+        "da",
+        "do",
+        "em",
+        "no",
+        "na",
+        "dos",
+        "das",
+        "e",
+        "ou",
+    }
+    words = [
+        w
+        for w in norm.split()
+        if len(w) >= 3 and w not in stopwords and not w.isdigit()
+    ]
+    return " ".join(words[:4])
+
+
+def _load_ml_history_blocklist(days: int = 7) -> tuple[set[str], set[str], list[str]]:
+    """Lê ml_history e queue dos últimos N dias para impedir repetição de produtos no ML."""
+    cutoff = (datetime.now(CUIABA_TZ) - timedelta(days=max(1, days))).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    used_keys: set[str] = set()
+    used_cores: set[str] = set()
+    used_titles: list[str] = []
+
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    try:
+        rows_h = cur.execute(
+            "SELECT item_key, title, product_url FROM ml_history WHERE created_at >= ?",
+            (cutoff,),
+        ).fetchall()
+        for ik, title, purl in rows_h:
+            if ik:
+                used_keys.add(str(ik).upper())
+            if purl:
+                used_keys.add(extract_ml_item_key(purl))
+            if title:
+                used_titles.append(title)
+                core = _extract_product_core_signature(title)
+                if len(core.split()) >= 3:
+                    used_cores.add(core)
+    except Exception as e:
+        logger.debug(f"Aviso ao ler ml_history: {e}")
+
+    try:
+        rows_q = cur.execute(
+            "SELECT product_url, formatted_message FROM queue WHERE created_at >= ?",
+            (cutoff.split(" ")[0],),
+        ).fetchall()
+        for purl, msg in rows_q:
+            if purl:
+                ik = extract_ml_item_key(purl)
+                if ik:
+                    used_keys.add(ik)
+            if msg:
+                m_t = re.search(r"🔥\s*(?:<b>|\*)?([^\n<*]+)", msg)
+                if m_t:
+                    t_clean = m_t.group(1).strip()
+                    used_titles.append(t_clean)
+                    core = _extract_product_core_signature(t_clean)
+                    if len(core.split()) >= 3:
+                        used_cores.add(core)
+    except Exception as e:
+        logger.debug(f"Aviso ao ler queue para ml_history: {e}")
+
+    conn.close()
+    return used_keys, used_cores, used_titles
+
+
 def _extract_nordic_ctx(html_text: str) -> dict | None:
-    """Extrai o JSON de _n.ctx.r presente no HTML do Mercado Livre."""
     for marker in ("_n.ctx.r=", "_n.ctx.r ="):
         idx = html_text.find(marker)
         if idx != -1:
@@ -184,7 +298,6 @@ def _extract_nordic_ctx(html_text: str) -> dict | None:
 def _parse_polycard(
     polycard: dict, source_type: str = "offers", category_name: str = ""
 ) -> dict | None:
-    """Converte um objeto polycard do JSON do ML em dicionário padronizado de oferta."""
     if not isinstance(polycard, dict):
         return None
 
@@ -207,9 +320,7 @@ def _parse_polycard(
     pics_list = (polycard.get("pictures") or {}).get("pictures") or []
     if pics_list and isinstance(pics_list, list):
         pic_id = pics_list[0].get("id")
-    image_url = (
-        f"https://http2.mlstatic.com/D_Q_NP_2X_{pic_id}-AB.webp" if pic_id else None
-    )
+    image_url = build_ml_image_url(pic_id)
 
     title = None
     seller = None
@@ -229,7 +340,8 @@ def _parse_polycard(
         c_type = comp.get("type")
 
         if c_type == "title":
-            title = (comp.get("title") or {}).get("text")
+            raw_t = (comp.get("title") or {}).get("text")
+            title = html_lib.unescape(raw_t) if raw_t else None
 
         elif c_type == "seller":
             seller_obj = comp.get("seller") or {}
@@ -334,9 +446,7 @@ def _parse_polycard(
 
 
 def _find_carousels_recursively(node, found_list: list):
-    """Busca recursivamente todos os carrosséis de categorias dentro do JSON de Mais Vendidos."""
     if isinstance(node, dict):
-        # Se este dicionário tem 'title' e 'polycards' (ou 'items' -> 'result' -> 'polycards')
         polycards = (
             ((node.get("items") or {}).get("result") or {}).get("polycards")
             if isinstance(node.get("items"), dict)
@@ -360,7 +470,6 @@ def _find_carousels_recursively(node, found_list: list):
 
 
 def _find_offer_cards_recursively(node, found_cards: list):
-    """Busca recursivamente todos os polycards dentro do JSON da página de Ofertas."""
     if isinstance(node, dict):
         if (
             "metadata" in node
@@ -381,20 +490,21 @@ def _find_offer_cards_recursively(node, found_cards: list):
 def fetch_ml_best_sellers_candidates(
     excluded_categories: list[str] | None = None,
 ) -> tuple[list[dict], list[str], dict[str, int]]:
-    """
-    Coleta os produtos da página Mais Vendidos do ML filtrando as categorias excluídas.
-    Retorna: (lista_candidatos, categorias_bloqueadas, contagem_por_categoria_aceita)
-    """
     if excluded_categories is None:
         excluded_categories = parse_csv_list(
-            get_config("ml_excluded_categories_bestsellers") or "Games, Informática"
+            get_config("ml_excluded_categories_bestsellers") or ""
         )
     excluded_norm = [_normalize_text(c) for c in excluded_categories if c.strip()]
 
+    bestsellers_url = (
+        get_config("ml_bestsellers_url")
+        or "https://www.mercadolivre.com.br/mais-vendidos"
+    ).strip()
+    min_price = float(get_config("ml_min_price") or "0")
+    max_price = float(get_config("ml_max_price") or "0")
+
     session = requests.Session()
-    resp = session.get(
-        DEFAULT_ML_MAIS_VENDIDOS_URL, headers=_build_ml_headers(), timeout=20
-    )
+    resp = session.get(bestsellers_url, headers=_build_ml_headers(), timeout=20)
     resp.raise_for_status()
 
     ctx = _extract_nordic_ctx(resp.text)
@@ -430,9 +540,17 @@ def fetch_ml_best_sellers_candidates(
                 source_type="best_sellers",
                 category_name=f"ML: {cat_clean}",
             )
-            if parsed:
-                candidates.append(parsed)
-                count_ok += 1
+            if not parsed:
+                continue
+
+            price_val = parsed.get("current_price") or 0
+            if min_price > 0 and price_val < min_price:
+                continue
+            if max_price > 0 and price_val > max_price:
+                continue
+
+            candidates.append(parsed)
+            count_ok += 1
 
         if count_ok > 0:
             accepted_cats[cat_clean] = accepted_cats.get(cat_clean, 0) + count_ok
@@ -443,15 +561,30 @@ def fetch_ml_best_sellers_candidates(
 def fetch_ml_offers_candidates(
     offers_url: str | None = None,
     excluded_terms: list[str] | None = None,
-    max_pages: int = 2,
+    max_pages: int | None = None,
 ) -> list[dict]:
     """
-    Coleta produtos da página de Ofertas (ex: Menos de R$ 100), buscando até `max_pages` páginas.
+    Coleta produtos das páginas de Ofertas configuradas no Portal:
+    - Suporta múltiplas URLs em `ml_offers_url` (separadas por linha ou vírgula)
+    - Sorteia `ml_pages_per_run` páginas dentro do alcance `ml_max_page_pool` (ex: páginas de 1 até 20)
+    - Se a página não retornar itens (fim da paginação), interrompe aquela URL automaticamente.
     """
-    base_url = (
-        offers_url or get_config("ml_offers_url") or DEFAULT_ML_OFERTAS_URL
-    ).strip()
-    base_url_clean = base_url.split("#")[0]
+    raw_urls_cfg = (offers_url or get_config("ml_offers_url") or "").strip()
+    base_urls = [u.strip() for u in re.split(r"[,;\n\r]+", raw_urls_cfg) if u.strip()]
+    if not base_urls:
+        logger.warning("⚠️ Nenhuma URL configurada em ml_offers_url no Portal.")
+        return []
+
+    min_price = float(get_config("ml_min_price") or "0")
+    max_price = float(get_config("ml_max_price") or "0")
+    min_discount = float(get_config("ml_min_discount") or "0")
+
+    pages_per_run = int(
+        max_pages if max_pages is not None else (get_config("ml_pages_per_run") or "4")
+    )
+    max_page_pool = int(get_config("ml_max_page_pool") or "15")
+    pages_per_run = max(1, min(30, pages_per_run))
+    max_page_pool = max(pages_per_run, min(50, max_page_pool))
 
     if excluded_terms is None:
         excluded_terms = parse_csv_list(
@@ -464,59 +597,91 @@ def fetch_ml_offers_candidates(
     candidates: list[dict] = []
     seen_keys: set[str] = set()
 
-    for page_num in range(1, max_pages + 1):
-        sep = "&" if "?" in base_url_clean else "?"
-        page_url = (
-            base_url_clean if page_num == 1 else f"{base_url_clean}{sep}page={page_num}"
-        )
-        try:
-            resp = session.get(page_url, headers=headers, timeout=20)
-            if resp.status_code != 200:
-                break
-            ctx = _extract_nordic_ctx(resp.text)
-            if not ctx:
-                break
+    for base_url in base_urls:
+        base_url_clean = base_url.split("#")[0]
+        is_lightning = "lightning" in base_url_clean.lower()
+        cat_label = "ML: Oferta Relâmpago ⚡" if is_lightning else "ML: Ofertas"
 
-            raw_cards = []
-            _find_offer_cards_recursively(ctx, raw_cards)
+        # Garante sempre a página 1 + sorteia o restante no universo de 2 até max_page_pool
+        if max_page_pool <= pages_per_run:
+            pages_to_fetch = list(range(1, max_page_pool + 1))
+        else:
+            extra_pages = random.sample(
+                range(2, max_page_pool + 1), k=max(0, pages_per_run - 1)
+            )
+            pages_to_fetch = [1] + sorted(extra_pages)
 
-            for card in raw_cards:
-                parsed = _parse_polycard(
-                    card,
-                    source_type="offers",
-                    category_name="ML: Ofertas (< R$100)",
-                )
-                if not parsed:
-                    continue
-                if parsed["item_key"] in seen_keys:
-                    continue
-                seen_keys.add(parsed["item_key"])
+        for page_num in pages_to_fetch:
+            sep = "&" if "?" in base_url_clean else "?"
+            page_url = (
+                base_url_clean
+                if page_num == 1
+                else f"{base_url_clean}{sep}page={page_num}"
+            )
+            try:
+                resp = session.get(page_url, headers=headers, timeout=20)
+                if resp.status_code != 200:
+                    break
+                ctx = _extract_nordic_ctx(resp.text)
+                if not ctx:
+                    break
 
-                if excluded_norm:
-                    t_norm = _normalize_text(parsed["title"])
-                    u_norm = _normalize_text(parsed["clean_url"])
-                    if any(ex in t_norm or ex in u_norm for ex in excluded_norm if ex):
+                raw_cards = []
+                _find_offer_cards_recursively(ctx, raw_cards)
+                if not raw_cards:
+                    # Fim das páginas disponíveis para esta URL
+                    break
+
+                for card in raw_cards:
+                    parsed = _parse_polycard(
+                        card,
+                        source_type="offers",
+                        category_name=cat_label,
+                    )
+                    if not parsed:
+                        continue
+                    if parsed["item_key"] in seen_keys:
                         continue
 
-                candidates.append(parsed)
-        except Exception as e:
-            logger.warning(f"Erro ao ler página {page_num} de Ofertas ML: {e}")
-            break
+                    price_val = parsed.get("current_price") or 0
+                    if min_price > 0 and price_val < min_price:
+                        continue
+                    if max_price > 0 and price_val > max_price:
+                        continue
+
+                    orig_val = parsed.get("original_price") or 0
+                    if min_discount > 0 and orig_val > price_val:
+                        disc_pct = ((orig_val - price_val) / orig_val) * 100.0
+                        if disc_pct < min_discount:
+                            continue
+
+                    seen_keys.add(parsed["item_key"])
+
+                    if excluded_norm:
+                        t_norm = _normalize_text(parsed["title"])
+                        u_norm = _normalize_text(parsed["clean_url"])
+                        if any(
+                            ex in t_norm or ex in u_norm for ex in excluded_norm if ex
+                        ):
+                            continue
+
+                    candidates.append(parsed)
+            except Exception as e:
+                logger.warning(f"Erro ao ler página {page_num} de Ofertas ML: {e}")
+                continue
 
     return candidates
 
 
 def simulate_ml_offers_selection(count: int = 10) -> dict:
-    """
-    Executa a busca completa do Mercado Livre em modo SIMULAÇÃO (Dry-Run / Laboratório).
-    Filtra categorias excluídas, aplica deduplicação semântica de 7 dias e sorteia
-    respeitando os 30% Mais Vendidos e 70% Ofertas (< R$ 100), SEM gastar conversão de link.
-    """
     t0 = time.perf_counter()
 
     best_pct = int(get_config("ml_best_sellers_pct") or "30")
     best_pct = max(0, min(100, best_pct))
-    dedup_days = int(get_config("ml_history_days") or "7")
+    dedup_days = max(
+        int(get_config("ml_history_days") or "7"),
+        int(get_config("dedup_history_days") or "7"),
+    )
     dedup_threshold = float(get_config("dedup_similarity_threshold") or "60")
 
     target_best = round(count * (best_pct / 100.0))
@@ -525,15 +690,19 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
     target_offers = max(0, count - target_best)
 
     best_raw, blocked_cats, accepted_cats = fetch_ml_best_sellers_candidates()
-    offers_raw = fetch_ml_offers_candidates(max_pages=2)
+    offers_raw = fetch_ml_offers_candidates()
 
     preloaded_profiles = offer_comparator.load_recent_queue_profiles(days=dedup_days)
+    used_ml_keys, used_ml_cores, used_ml_titles = _load_ml_history_blocklist(
+        days=dedup_days
+    )
 
     random.shuffle(best_raw)
     random.shuffle(offers_raw)
 
-    accepted_titles: list[str] = []
-    seen_keys: set[str] = set()
+    accepted_titles: list[str] = list(used_ml_titles)
+    seen_keys: set[str] = set(used_ml_keys)
+    seen_cores: set[str] = set(used_ml_cores)
     skipped_duplicates = 0
 
     def _pick_from_pool(pool: list[dict], needed: int) -> list[dict]:
@@ -542,10 +711,15 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
         for item in pool:
             if len(picked) >= needed:
                 break
-            ik = item["item_key"]
+            ik = str(item["item_key"]).upper()
             if ik in seen_keys:
+                skipped_duplicates += 1
                 continue
-            seen_keys.add(ik)
+
+            core_sig = _extract_product_core_signature(item["title"])
+            if len(core_sig.split()) >= 3 and core_sig in seen_cores:
+                skipped_duplicates += 1
+                continue
 
             is_dup, reason = offer_comparator.is_product_recently_used_or_blocked(
                 candidate_title=item["title"],
@@ -554,12 +728,17 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
                 threshold=dedup_threshold,
                 extra_accepted_titles=accepted_titles,
                 preloaded_db_profiles=preloaded_profiles,
+                candidate_item_key=ik,
             )
             if is_dup:
                 skipped_duplicates += 1
                 continue
 
+            seen_keys.add(ik)
+            if len(core_sig.split()) >= 3:
+                seen_cores.add(core_sig)
             accepted_titles.append(item["title"])
+
             item_preview = {
                 **item,
                 "affiliate_url": "https://meli.la/PREVIA_SIMULACAO",
@@ -571,14 +750,12 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
     chosen_best = _pick_from_pool(best_raw, target_best)
     chosen_offers = _pick_from_pool(offers_raw, target_offers)
 
-    # Completa caso uma das fontes tenha menos itens
     total_got = len(chosen_best) + len(chosen_offers)
     if total_got < count:
         missing = count - total_got
         extra = _pick_from_pool(offers_raw + best_raw, missing)
         chosen_offers.extend(extra)
 
-    # Intercala os itens
     final_items = []
     cb = list(chosen_best)
     co = list(chosen_offers)
@@ -611,16 +788,11 @@ def convert_and_enqueue_ml_item(
     priority: int = 0,
     fallback_card_data: dict | None = None,
 ) -> bool:
-    """
-    Converte 1 produto aprovado do Mercado Livre em link oficial de afiliado (meli.la),
-    formata a mensagem com a função única `ml_offer.format_product_message` e salva na fila.
-    """
     try:
         offer = ml_offer._build_offer_sync(product_url)
         if not offer or not offer.get("affiliate_url"):
             return False
 
-        # Se algum dado veio mais rico no card da listagem (ex: discount_label), preserva como fallback
         if fallback_card_data:
             for k in (
                 "title",
@@ -633,8 +805,9 @@ def convert_and_enqueue_ml_item(
                 if not offer.get(k) and fallback_card_data.get(k):
                     offer[k] = fallback_card_data[k]
 
-        msg = ml_offer.format_product_message(offer, offer["affiliate_url"])
+        offer["image_url"] = build_ml_image_url(offer.get("image_url"))
         media_url = offer.get("image_url")
+        msg = ml_offer.format_product_message(offer, offer["affiliate_url"])
 
         add_to_queue(
             store="Mercado Livre",
@@ -646,6 +819,43 @@ def convert_and_enqueue_ml_item(
             target_date=target_date,
             category=category_name,
         )
+
+        # Grava no ml_history TANTO o item_key do card QUANTO o item_id final (caso seja /p/ redirecionado)
+        try:
+            keys_to_save = set()
+            if fallback_card_data and fallback_card_data.get("item_key"):
+                keys_to_save.add(str(fallback_card_data["item_key"]).upper())
+            if offer.get("item_id"):
+                keys_to_save.add(str(offer["item_id"]).upper())
+            ext_k = extract_ml_item_key(product_url)
+            if ext_k:
+                keys_to_save.add(ext_k.upper())
+
+            now_str = datetime.now(CUIABA_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(DB_NAME)
+            for k_val in keys_to_save:
+                if not k_val:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ml_history
+                    (item_key, product_url, title, source_type, category_name, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        k_val,
+                        clean_url(product_url),
+                        offer.get("title") or "",
+                        (fallback_card_data or {}).get("source_type", "auto"),
+                        category_name,
+                        now_str,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e_hist:
+            logger.debug(f"Aviso ao gravar ml_history: {e_hist}")
+
         return True
     except Exception as e:
         logger.error(f"Erro ao converter e enfileirar item ML ({product_url}): {e}")
@@ -653,13 +863,8 @@ def convert_and_enqueue_ml_item(
 
 
 def _interleave_pending_auto_queue(target_date: str) -> None:
-    """
-    Reorganiza os itens automáticos pendentes (priority=0, status='pending') da data alvo
-    para que Shopee e Mercado Livre fiquem perfeitamente intercalados na ordem de envio (id ASC).
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
     cursor.execute(
         """
         SELECT id, store, product_url, formatted_message, media_url, media_type,
@@ -676,80 +881,89 @@ def _interleave_pending_auto_queue(target_date: str) -> None:
         conn.close()
         return
 
-    ids_ordered = [r[0] for r in rows]
-    shopee_items = [r[1:] for r in rows if "shopee" in (r[1] or "").lower()]
-    ml_items = [r[1:] for r in rows if "mercado" in (r[1] or "").lower()]
-    other_items = [
-        r[1:]
-        for r in rows
-        if "shopee" not in (r[1] or "").lower()
-        and "mercado" not in (r[1] or "").lower()
-    ]
+    buckets: dict[str, list] = {"shopee": [], "amazon": [], "mercado": [], "other": []}
+    for r in rows:
+        s = (r[1] or "").lower()
+        if "shopee" in s:
+            buckets["shopee"].append(r)
+        elif "amazon" in s:
+            buckets["amazon"].append(r)
+        elif "mercado" in s:
+            buckets["mercado"].append(r)
+        else:
+            buckets["other"].append(r)
 
-    # Se só houver uma loja na fila pendente, não precisa reordenar
-    if not shopee_items or not ml_items:
+    active = [k for k in ("shopee", "amazon", "mercado") if buckets[k]]
+    if len(active) < 2:
         conn.close()
         return
 
-    # Intercala proporcionalmente (Bresenham / distribuição uniforme exata)
-    interleaved_payloads = []
-    total_s = len(shopee_items)
-    total_m = len(ml_items)
-    total_mix = total_s + total_m
+    ids_ordered = [r[0] for r in rows]
+    totals = {k: len(buckets[k]) for k in active}
+    idxs = {k: 0 for k in active}
+    payloads = []
 
-    idx_s = 0
-    idx_m = 0
+    while any(idxs[k] < totals[k] for k in active):
+        best_k, best_ratio = None, 2.0
+        for k in active:
+            if idxs[k] >= totals[k]:
+                continue
+            ratio = idxs[k] / totals[k]
+            if ratio < best_ratio:
+                best_ratio, best_k = ratio, k
+        if best_k is None:
+            break
+        payloads.append(buckets[best_k][idxs[best_k]][1:])
+        idxs[best_k] += 1
 
-    for step in range(1, total_mix + 1):
-        # Decide qual loja está "atrasada" em relação à sua proporção ideal no lote
-        ratio_s = idx_s / total_s if total_s else 1.0
-        ratio_m = idx_m / total_m if total_m else 1.0
+    payloads.extend(r[1:] for r in buckets["other"])
 
-        if idx_s < total_s and (idx_m >= total_m or ratio_s <= ratio_m):
-            interleaved_payloads.append(shopee_items[idx_s])
-            idx_s += 1
-        elif idx_m < total_m:
-            interleaved_payloads.append(ml_items[idx_m])
-            idx_m += 1
-
-    interleaved_payloads.extend(other_items)
-
-    # Atualiza os registros mantendo exatamente os mesmos IDs (em ordem crescente),
-    # mas com os conteúdos intercalados!
-    for target_id, payload in zip(ids_ordered, interleaved_payloads):
+    for target_id, payload in zip(ids_ordered, payloads):
         cursor.execute(
             """
-            UPDATE queue
-            SET store = ?, product_url = ?, formatted_message = ?, media_url = ?,
-                media_type = ?, priority = ?, status = ?, target_date = ?,
-                scheduled_at = ?, created_at = ?, category = ?
-            WHERE id = ?
+            UPDATE queue SET store=?, product_url=?, formatted_message=?, media_url=?,
+                media_type=?, priority=?, status=?, target_date=?, scheduled_at=?,
+                created_at=?, category=? WHERE id=?
             """,
             (*payload, target_id),
         )
-
     conn.commit()
     conn.close()
-    logger.info(
-        f"🔀 Fila de {target_date} intercalada com sucesso ({total_s} Shopee ⇄ {total_m} Mercado Livre)!"
-    )
+    logger.info(f"🔀 Fila de {target_date} intercalada ({totals}).")
 
 
 def generate_mixed_auto_offers_to_queue(
     total_count: int, target_date: str, keywords_csv: str = ""
 ) -> dict:
-    """
-    Orquestrador de Geração Automática:
-    - Se `ml_auto_enabled == '1'`, divide o lote em 60% Shopee e 40% Mercado Livre (configurável)
-      e intercala os itens na fila para alternar os disparos entre Shopee e ML.
-    - Se `ml_auto_enabled == '0'`, gera 100% Shopee no automático.
-    """
     ml_enabled = get_config("ml_auto_enabled") == "1"
-    shopee_pct = int(get_config("mix_shopee_pct") or "60") if ml_enabled else 100
-    shopee_pct = max(0, min(100, shopee_pct))
+    amazon_enabled = get_config("amazon_auto_enabled") == "1"
 
-    shopee_target = round(total_count * (shopee_pct / 100.0))
-    ml_target = max(0, total_count - shopee_target)
+    shopee_pct = int(get_config("mix_shopee_pct") or "60")
+    amazon_pct = int(get_config("mix_amazon_pct") or "0") if amazon_enabled else 0
+    ml_pct = 100 - shopee_pct - amazon_pct
+    if ml_pct < 0:
+        amazon_pct = max(0, 100 - shopee_pct)
+        ml_pct = 0
+    if not ml_enabled:
+        shopee_pct += ml_pct
+        ml_pct = 0
+    if not amazon_enabled:
+        shopee_pct += amazon_pct
+        amazon_pct = 0
+
+    total_pct = shopee_pct + amazon_pct + ml_pct or 1
+    shopee_target = round(total_count * shopee_pct / total_pct)
+    amazon_target = round(total_count * amazon_pct / total_pct)
+    ml_target = max(0, total_count - shopee_target - amazon_target)
+
+    amazon_added = 0
+    amazon_fallbacks: list[str] = []
+    if amazon_target > 0:
+        from amazon_auto import generate_amazon_auto_offers_to_queue
+
+        res = generate_amazon_auto_offers_to_queue(amazon_target, target_date)
+        amazon_added = res["added"]
+        amazon_fallbacks = res["fallbacks"]
 
     ml_added = 0
     if ml_target > 0:
@@ -757,36 +971,36 @@ def generate_mixed_auto_offers_to_queue(
         for cand in sim["items"]:
             if ml_added >= ml_target:
                 break
-            ok = convert_and_enqueue_ml_item(
-                product_url=cand["product_url"],
-                target_date=target_date,
-                category_name=cand.get("category_name", "ML: Automático"),
-                priority=0,
-                fallback_card_data=cand,
-            )
-            if ok:
+            if convert_and_enqueue_ml_item(
+                cand["product_url"],
+                target_date,
+                cand.get("category_name", "ML: Automático"),
+                0,
+                cand,
+            ):
                 ml_added += 1
 
-    # Compensa com Shopee se faltou algum item do ML
-    shopee_actual_target = shopee_target + max(0, ml_target - ml_added)
+    missing = (amazon_target - amazon_added) + (ml_target - ml_added)
+    shopee_actual = shopee_target + missing
     shopee_added = 0
+    if shopee_actual > 0:
+        app_id = os.environ.get("SHOPEE_APP_ID")
+        app_secret = os.environ.get("SHOPEE_APP_SECRET")
+        if app_id and app_secret:
+            api = ShopeeAffiliateAPI(app_id, app_secret)
+            shopee_added = api.generate_auto_offers_to_queue(
+                count=shopee_actual,
+                target_date=target_date,
+                keywords_csv=keywords_csv,
+            )
 
-    app_id = os.environ.get("SHOPEE_APP_ID")
-    app_secret = os.environ.get("SHOPEE_APP_SECRET")
-    if shopee_actual_target > 0 and app_id and app_secret:
-        api = ShopeeAffiliateAPI(app_id, app_secret)
-        shopee_added = api.generate_auto_offers_to_queue(
-            count=shopee_actual_target,
-            target_date=target_date,
-            keywords_csv=keywords_csv,
-        )
-
-    # Intercala os itens pendentes na fila para alternar Shopee e Mercado Livre!
-    if shopee_added > 0 and ml_added > 0:
+    if sum([shopee_added, amazon_added, ml_added]) > 1:
         _interleave_pending_auto_queue(target_date)
 
     return {
-        "total_added": shopee_added + ml_added,
+        "total_added": shopee_added + amazon_added + ml_added,
         "shopee_added": shopee_added,
+        "amazon_added": amazon_added,
         "ml_added": ml_added,
+        "amazon_fallbacks": amazon_fallbacks,
     }

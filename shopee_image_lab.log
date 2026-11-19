@@ -1,0 +1,77 @@
+15:35:39 | INFO    | ======================================================================
+15:35:39 | INFO    | 🧪 TESTE ARQUIVO BRUTO SHOPEE (ZERO COMPACTAÇÃO) | Oferta #1062
+15:35:39 | INFO    | 🔗 Baixando de: https://cf.shopee.com.br/file/br-11134207-820lm-mqn9oiv60d1cdb
+15:35:40 | INFO    | 📥 Arquivo baixado intacto: 37.63 kB | Header HTTP='image/jpeg' | Formato Binário='image/jpeg'
+15:35:42 | INFO    | 📤 [ENVIO 1: Arquivo Baixado (Base64 Intacto s/ legenda)] HTTP Status: 201
+15:35:42 | INFO    |    ↳ Resultado Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 45662, 'high': 0, 'unsigned': True}
+15:35:48 | INFO    | 📤 [ENVIO 2: Arquivo Baixado (Upload Binário Multipart s/ legenda)] HTTP Status: 201
+15:35:48 | INFO    |    ↳ Resultado Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 45662, 'high': 0, 'unsigned': True}
+15:35:48 | INFO    | ======================================================================
+15:39:43 | INFO    | ======================================================================
+15:39:43 | INFO    | 🧪 TESTE ARQUIVO BRUTO SHOPEE (ZERO COMPACTAÇÃO) | Oferta #1068
+15:39:43 | INFO    | 🔗 Baixando de: https://cf.shopee.com.br/file/br-11134207-820l8-mtqug72xet4x5c
+15:39:44 | INFO    | 📥 Arquivo baixado intacto: 572.3 kB | Header HTTP='image/jpeg' | Formato Binário='image/jpeg'
+15:39:46 | INFO    | 📤 [ENVIO 1: Arquivo Baixado (Base64 Intacto s/ legenda)] HTTP Status: 201
+15:39:46 | INFO    |    ↳ Resultado Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 57844, 'high': 0, 'unsigned': True}
+15:39:52 | INFO    | 📤 [ENVIO 2: Arquivo Baixado (Upload Binário Multipart s/ legenda)] HTTP Status: 201
+15:39:52 | INFO    |    ↳ Resultado Baileys: jpegThumbnail=True (len=18928) | width=930 | height=930 | fileLength={'low': 57844, 'high': 0, 'unsigned': True}
+15:39:52 | INFO    | ======================================================================
+15:42:50 | INFO    | ======================================================================
+15:42:50 | INFO    | 🧪 LABORATÓRIO DE CONVERSÃO DE FORMATOS (JFIF/JPG/JPEG/PNG) | Oferta #1068
+15:42:50 | INFO    | 🔗 Baixando de: https://cf.shopee.com.br/file/br-11134207-820l8-mtqug72xet4x5c
+15:42:50 | INFO    | 📥 Baixado com sucesso: 572.3 kB
+15:42:52 | INFO    | 📤 [Base64 Bruto Original (.jfif/.jpg)] HTTP Status: 201
+15:42:52 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=18928) | width=930 | height=930 | fileLength={'low': 57844, 'high': 0, 'unsigned': True}
+15:42:58 | INFO    | 📤 [Convertido .jpg (Pillow Quality=95)] HTTP Status: 201
+15:42:58 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 59176, 'high': 0, 'unsigned': True}
+15:43:03 | INFO    | 📤 [Convertido .jpeg (Pillow Quality=95)] HTTP Status: 201
+15:43:03 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 59176, 'high': 0, 'unsigned': True}
+15:43:09 | INFO    | 📤 [Convertido .png (Pillow Lossless)] HTTP Status: 201
+15:43:09 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 57844, 'high': 0, 'unsigned': True}
+15:43:13 | INFO    | ======================================================================
+15:44:08 | INFO    | ======================================================================
+15:44:08 | INFO    | 🧪 LABORATÓRIO DE CONVERSÃO DE FORMATOS (JFIF/JPG/JPEG/PNG) | Oferta #1062
+15:44:08 | INFO    | 🔗 Baixando de: https://cf.shopee.com.br/file/br-11134207-820lm-mqn9oiv60d1cdb
+15:44:08 | INFO    | 📥 Baixado com sucesso: 37.63 kB
+15:44:10 | INFO    | 📤 [Base64 Bruto Original (.jfif/.jpg)] HTTP Status: 201
+15:44:10 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 45662, 'high': 0, 'unsigned': True}
+15:44:15 | INFO    | 📤 [Convertido .jpg (Pillow Quality=95)] HTTP Status: 201
+15:44:15 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 46419, 'high': 0, 'unsigned': True}
+15:44:21 | INFO    | 📤 [Convertido .jpeg (Pillow Quality=95)] HTTP Status: 201
+15:44:21 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 46419, 'high': 0, 'unsigned': True}
+15:44:26 | INFO    | 📤 [Convertido .png (Pillow Lossless)] HTTP Status: 201
+15:44:26 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 45662, 'high': 0, 'unsigned': True}
+15:44:30 | INFO    | ======================================================================
+16:08:01 | INFO    | ======================================================================
+16:08:01 | INFO    | 🧪 LABORATÓRIO ANTI-46KB (DESTRAVANDO THUMBNAIL SHOPEE) | Oferta #1062
+16:08:01 | INFO    | 🔗 URL: https://cf.shopee.com.br/file/br-11134207-820lm-mqn9oiv60d1cdb
+16:08:02 | INFO    | 📥 Original da Shopee: 37.63 kB | Dimensão Original: 1024x1024 | Formato: JPEG
+16:08:05 | INFO    | 📤 [OPÇÃO 1: Upscale 1200px + Sharpness] HTTP Status: 201
+16:08:05 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=14265) | width=1200 | height=1200 | fileLength={'low': 81826, 'high': 0, 'unsigned': True}
+16:08:11 | INFO    | 📤 [OPÇÃO 2: Upscale 1600px HD] HTTP Status: 201
+16:08:11 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=14319) | width=1600 | height=1600 | fileLength={'low': 119709, 'high': 0, 'unsigned': True}
+16:08:16 | INFO    | 📤 [OPÇÃO 3: 1200px + Anti-Compressão (>85kB)] HTTP Status: 201
+16:08:16 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=14073) | width=1200 | height=1200 | fileLength={'low': 79166, 'high': 0, 'unsigned': True}
+16:08:20 | INFO    | ======================================================================
+16:08:37 | INFO    | ======================================================================
+16:08:37 | INFO    | 🧪 LABORATÓRIO ANTI-46KB (DESTRAVANDO THUMBNAIL SHOPEE) | Oferta #1068
+16:08:37 | INFO    | 🔗 URL: https://cf.shopee.com.br/file/br-11134207-820l8-mtqug72xet4x5c
+16:08:38 | INFO    | 📥 Original da Shopee: 572.3 kB | Dimensão Original: 930x930 | Formato: JPEG
+16:08:40 | INFO    | 📤 [OPÇÃO 1: Upscale 1200px + Sharpness] HTTP Status: 201
+16:08:40 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=19068) | width=1200 | height=1200 | fileLength={'low': 91106, 'high': 0, 'unsigned': True}
+16:08:45 | INFO    | 📤 [OPÇÃO 2: Upscale 1600px HD] HTTP Status: 201
+16:08:45 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=19281) | width=1600 | height=1600 | fileLength={'low': 135408, 'high': 0, 'unsigned': True}
+16:08:51 | INFO    | 📤 [OPÇÃO 3: 1200px + Anti-Compressão (>85kB)] HTTP Status: 201
+16:08:51 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=18806) | width=1200 | height=1200 | fileLength={'low': 85725, 'high': 0, 'unsigned': True}
+16:08:55 | INFO    | ======================================================================
+09:20:48 | INFO    | ======================================================================
+09:20:48 | INFO    | 🧪 LABORATÓRIO ANTI-46KB (DESTRAVANDO THUMBNAIL SHOPEE) | Oferta #1088
+09:20:48 | INFO    | 🔗 URL: https://cf.shopee.com.br/file/br-11134207-820ls-mmkfyhrc9a868b
+09:20:49 | INFO    | 📥 Original da Shopee: 92.76 kB | Dimensão Original: 1024x1024 | Formato: JPEG
+09:20:52 | INFO    | 📤 [OPÇÃO 1: Upscale 1200px + Sharpness] HTTP Status: 201
+09:20:52 | INFO    |    ↳ Baileys: jpegThumbnail=False (len=0) | width=None | height=None | fileLength={'low': 57527, 'high': 0, 'unsigned': True}
+09:20:58 | INFO    | 📤 [OPÇÃO 2: Upscale 1600px HD] HTTP Status: 201
+09:20:58 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=13746) | width=1600 | height=1600 | fileLength={'low': 83603, 'high': 0, 'unsigned': True}
+09:21:04 | INFO    | 📤 [OPÇÃO 3: 1200px + Anti-Compressão (>85kB)] HTTP Status: 201
+09:21:04 | INFO    |    ↳ Baileys: jpegThumbnail=True (len=13598) | width=1200 | height=1200 | fileLength={'low': 56005, 'high': 0, 'unsigned': True}
+09:21:08 | INFO    | ======================================================================

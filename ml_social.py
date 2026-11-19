@@ -28,6 +28,39 @@ def _brl_str(val: float) -> str:
     return "R$ " + f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def build_ml_image_url(raw_id_or_url: str | None) -> str | None:
+    """
+    FUNÇÃO CENTRAL E ÚNICA para imagens do Mercado Livre em todo o sistema.
+    Extrai o ID único da foto (ex: '965103-MLA99575749404_122025') de qualquer string/URL
+    e devolve SEMPRE na versão de máxima definição do anúncio: D_NQ_NP_2X_{id}-F.jpg.
+    """
+    if not raw_id_or_url:
+        return None
+    s = str(raw_id_or_url).strip()
+
+    # Se for URL de outra loja (Shopee, Amazon), devolve intacta
+    if s.startswith("http") and "mlstatic.com" not in s:
+        return s
+
+    # Extrai o ID oficial da imagem do ML (ex: 965103-MLA99575749404_122025 ou 794417-MLB...)
+    m = re.search(r"(\d{5,7}-ML[A-Z]\d+_\d{4,6})", s, re.IGNORECASE)
+    if m:
+        pic_id = m.group(1)
+        return f"https://http2.mlstatic.com/D_NQ_NP_2X_{pic_id}-F.jpg"
+
+    # Fallback para URLs do mlstatic com formatos antigos
+    if s.startswith("http"):
+        s = s.replace("/D_Q_NP_", "/D_NQ_NP_")
+        s = re.sub(
+            r"-[A-Z]{1,2}\.(?:webp|jpg|jpeg|png)$", "-F.jpg", s, flags=re.IGNORECASE
+        )
+        if s.lower().endswith(".webp"):
+            s = s[:-5] + ".jpg"
+        return s
+
+    return f"https://http2.mlstatic.com/D_NQ_NP_2X_{s}-F.jpg"
+
+
 def _extract_ctx(html: str) -> dict | None:
     m = re.search(r"_n\.ctx\.r\s*=\s*", html)
     if not m:
@@ -51,7 +84,6 @@ def _walk(obj):
 
 def _find_featured_polycard(data: dict, shared_ids: list[str]) -> dict | None:
     """Busca primeiro o polycard dentro do componente 'card-featured' ou pelo shared_id."""
-    # 1. Procura direto no componente de destaque 'card-featured'
     for comp in data.get("components") or []:
         if isinstance(comp, dict) and comp.get("id") == "card-featured":
             pcs = (
@@ -60,7 +92,6 @@ def _find_featured_polycard(data: dict, shared_ids: list[str]) -> dict | None:
             if pcs and isinstance(pcs[0], dict):
                 return pcs[0]
 
-    # 2. Procura em todos os polycards comparando id, user_product_id e product_id
     all_cards = []
     for node in _walk(data):
         pcs = node.get("polycards")
@@ -129,11 +160,10 @@ def _info_from_polycard(card: dict) -> dict:
     label = (price.get("discount_label") or {}).get("text") or ""
     is_pix = "pix" in label.lower()
 
-    # Analisa o bloco 'installments' (pode ser "ou R$ X em outros meios" OU "em 10x R$ X sem juros")
     inst = price.get("installments") or {}
     inst_raw_text = inst.get("text") or ""
     inst_values = inst.get("values") or []
-    inst_no_interest = inst.get("no_interest")  # True = sem juros, False = com juros
+    inst_no_interest = inst.get("no_interest")
 
     other_means_price = None
     installments_text = None
@@ -141,7 +171,6 @@ def _info_from_polycard(card: dict) -> dict:
     if inst_raw_text:
         formatted_inst = _format_interpolated_text(inst_raw_text, inst_values)
         if "outros meios" in inst_raw_text.lower():
-            # É o preço normal fora do Pix ("ou R$ 329,99 em outros meios")
             for v in inst_values:
                 if (
                     isinstance(v, dict)
@@ -150,7 +179,6 @@ def _info_from_polycard(card: dict) -> dict:
                     other_means_price = float(v["price"]["value"])
                     break
         else:
-            # É informação de parcelamento real (ex: "em 10x R$ 32,99 sem juros")
             installments_text = formatted_inst
             if (
                 inst_no_interest is True
@@ -182,20 +210,20 @@ def _info_from_polycard(card: dict) -> dict:
     )
     pix_price = current if is_pix else None
 
+    raw_title = (comps.get("title") or {}).get("text")
+
     return {
         "itemId": meta.get("id")
         or meta.get("user_product_id")
         or meta.get("product_id"),
-        "title": (comps.get("title") or {}).get("text"),
+        "title": html_lib.unescape(raw_title) if raw_title else None,
         "price": regular_price,
         "pix_price": pix_price,
         "original_price": previous,
         "discount_label": label or None,
         "installments_text": installments_text,
         "installments_no_interest": inst_no_interest,
-        "thumbnail": (
-            f"https://http2.mlstatic.com/D_NQ_NP_{pic_id}-O.jpg" if pic_id else None
-        ),
+        "thumbnail": build_ml_image_url(pic_id),
         "seller": seller,
         "product_url": product_url,
     }
@@ -213,7 +241,6 @@ def _parse_direct_product_html(html: str, final_url: str = "") -> dict | None:
     installments_no_interest = None
     item_id = None
 
-    # 1. Tenta JSON-LD oficial presente na página do produto
     ld_matches = re.findall(
         r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
         html,
@@ -234,7 +261,6 @@ def _parse_direct_product_html(html: str, final_url: str = "") -> dict | None:
         except Exception:
             pass
 
-    # 2. Meta tags OpenGraph
     if not title:
         m_t = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
         if m_t:
@@ -245,11 +271,9 @@ def _parse_direct_product_html(html: str, final_url: str = "") -> dict | None:
         if m_i:
             image_url = m_i.group(1)
 
-    # 3. Inspeciona o _n.ctx.r da página de produto (PDP) para pegar original_price, Pix e parcelas
     ctx = _extract_ctx(html)
     if ctx:
         for node in _walk(ctx):
-            # Preço original riscado na PDP
             if original_price is None and isinstance(
                 node.get("original_price"), (int, float)
             ):
@@ -260,20 +284,29 @@ def _parse_direct_product_html(html: str, final_url: str = "") -> dict | None:
                 and node.get("currency_id") == "BRL"
             ):
                 price = float(node["price"])
+            # Tenta capturar também o ID da foto na galeria do PDP caso og:image seja pequeno
+            if (
+                not image_url
+                and isinstance(node.get("pictures"), list)
+                and node["pictures"]
+            ):
+                first_pic = node["pictures"][0]
+                if isinstance(first_pic, dict) and first_pic.get("id"):
+                    image_url = first_pic["id"]
 
     if not title and price is None:
         return None
 
     return {
         "itemId": item_id,
-        "title": title,
+        "title": html_lib.unescape(title) if title else None,
         "price": price,
         "pix_price": pix_price,
         "original_price": original_price,
         "discount_label": discount_label,
         "installments_text": installments_text,
         "installments_no_interest": installments_no_interest,
-        "thumbnail": image_url,
+        "thumbnail": build_ml_image_url(image_url),
         "seller": None,
         "product_url": final_url or None,
     }
@@ -299,8 +332,11 @@ def parse_social_html(html: str, final_url: str = "") -> dict | None:
 
     if card:
         info = _info_from_polycard(card)
-        info["title"] = info.get("title") or _meta_tag(data, "title")
-        info["thumbnail"] = info.get("thumbnail") or _meta_tag(data, "image")
+        raw_t = info.get("title") or _meta_tag(data, "title")
+        info["title"] = html_lib.unescape(raw_t) if raw_t else None
+        info["thumbnail"] = build_ml_image_url(
+            info.get("thumbnail") or _meta_tag(data, "image")
+        )
         if not info.get("product_url") and shared_ids:
             sid = shared_ids[0]
             if sid.startswith("MLB") and not sid.startswith("MLBU"):
@@ -309,7 +345,6 @@ def parse_social_html(html: str, final_url: str = "") -> dict | None:
                 )
         return info
 
-    # Se não for uma página /social/ com polycard, tenta ler como página direta do produto (PDP)
     return _parse_direct_product_html(html, final_url=final_url)
 
 
@@ -322,7 +357,6 @@ def fetch_social_product(url: str, debug: bool = False) -> dict:
         "accept-language": "pt-BR,pt;q=0.9",
     }
     if cookie:
-        # Remove aspas simples extras caso estejam salvas no .env
         headers["cookie"] = cookie.strip().strip("'")
 
     r = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
@@ -342,22 +376,3 @@ def fetch_social_product(url: str, debug: bool = False) -> dict:
             "ou uma página de verificação do ML)."
         )
     return info
-
-
-if __name__ == "__main__":
-    import sys
-
-    link = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else input("🔗 Link /social/ ou arquivo HTML: ").strip()
-    )
-    if os.path.exists(link):
-        with open(link, "r", encoding="utf-8") as f:
-            print(json.dumps(parse_social_html(f.read()), ensure_ascii=False, indent=2))
-    else:
-        print(
-            json.dumps(
-                fetch_social_product(link, debug=True), ensure_ascii=False, indent=2
-            )
-        )

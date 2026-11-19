@@ -1,11 +1,7 @@
 """
 Monta a oferta do Mercado Livre sem navegador e sem API oficial,
 usando apenas a conversão interna (createLink) e a leitura do HTML (_n.ctx.r).
-
-Retorna:
-    affiliate_url, image_url, title, current_price, original_price,
-    regular_price, pix_price, discount_label, installments_text,
-    installments_no_interest, seller, item_id, product_url
+Formatado no Padrão Curto Escaneável (5 linhas).
 """
 
 import asyncio
@@ -21,26 +17,21 @@ from ml_affiliate import (
     resolve_product_url,
 )
 from ml_social import SocialPageBlocked, fetch_social_product
+from ai_copy_service import clean_product_title, prepend_ai_hook_to_message
 
 logger = logging.getLogger(__name__)
 
-# Último erro (texto) para o bot poder avisar, ex.: sessão do afiliado expirada
 last_error: str | None = None
 
 
 def _build_offer_sync(raw_url: str, debug: bool = False) -> dict:
-    # 1. Expande o link. Se for link de outro afiliado (/social/), já traz 'info' completo!
     _, product_url, info = resolve_product_url(raw_url, debug=debug)
-
-    # 2. Limpa a URL do produto e cria o seu link de afiliado (short_url + long_url)
     cleaned = clean_url(product_url)
     ensure_product_url(cleaned)
 
     link = create_affiliate_link_full(cleaned, debug=debug)
     affiliate_url = link["short_url"]
 
-    # 3. Se o link enviado era um link direto de produto (info ainda é None),
-    #    buscamos os dados na página do link gerado (short_url abre a página /social/ com o card!)
     if not info or info.get("price") is None:
         target_to_read = affiliate_url or link.get("long_url") or cleaned
         try:
@@ -58,7 +49,6 @@ def _build_offer_sync(raw_url: str, debug: bool = False) -> dict:
     pix = info.get("pix_price")
 
     return {
-        # --- mesmas chaves esperadas pelo bot.py ---
         "affiliate_url": affiliate_url,
         "image_url": info.get("thumbnail"),
         "title": info.get("title"),
@@ -67,7 +57,6 @@ def _build_offer_sync(raw_url: str, debug: bool = False) -> dict:
         "rating": None,
         "reviews_count": None,
         "sales": None,
-        # --- detalhes de preço (Pix, Normal e Parcelamento) ---
         "regular_price": price,
         "pix_price": pix,
         "price_note": "no Pix" if pix is not None else None,
@@ -81,7 +70,6 @@ def _build_offer_sync(raw_url: str, debug: bool = False) -> dict:
 
 
 async def get_ml_offer(product_url: str, debug: bool = False) -> dict | None:
-    """Versão assíncrona (roda o código bloqueante em outra thread)."""
     global last_error
     last_error = None
     try:
@@ -100,15 +88,19 @@ def _brl(value) -> str:
 
 
 def format_product_message(offer: dict, link: str | None = None) -> str:
-    """Função única e centralizada para formatar a mensagem do Mercado Livre (Telegram, Portal e WhatsApp)."""
+    """
+    Padrão Curto Unificado (5 a 6 linhas):
+    🔥 Título Limpo
+    💰 De ~R$ X~ por R$ Y no Pix (Z% OFF)
+    💳 Parcelamento (se houver)
+    👉 Link direto
+    """
     aff_link = link or offer.get("affiliate_url") or ""
     raw_title = offer.get("title")
-    title = html.escape(str(raw_title)) if raw_title else None
-
-    header_title = (
-        f"🔥 <b>{title}</b>\n\n"
-        if title
-        else "🔥 <b>PRODUTO EM DESTAQUE NO MERCADO LIVRE</b>\n\n"
+    short_title = (
+        clean_product_title(raw_title, max_len=68)
+        if raw_title
+        else "Oferta no Mercado Livre"
     )
 
     cur = offer.get("current_price")
@@ -118,74 +110,41 @@ def format_product_message(offer: dict, link: str | None = None) -> str:
     discount_label = (offer.get("discount_label") or "").strip()
     inst_text = offer.get("installments_text")
 
-    # --- 1. Destaque do Desconto (% OFF no Pix / Normal) ---
-    is_pix_deal = bool(pix or (discount_label and "pix" in discount_label.lower()))
-    discount_line = ""
-
+    # Badge de desconto compacto na mesma linha do preço
+    disc_badge = ""
     if discount_label:
-        label_clean = html.escape(discount_label.replace("!", "").strip())
-        if "pix" in label_clean.lower():
-            discount_line = f"🔥 <b>{label_clean}</b>\n\n"
-        elif is_pix_deal:
-            discount_line = f"🔥 <b>{label_clean} no Pix</b>\n\n"
-        else:
-            discount_line = f"🔥 <b>{label_clean}</b>\n\n"
+        lbl = html.escape(discount_label.replace("!", "").strip())
+        disc_badge = f" <i>({lbl})</i>"
     elif orig and cur and orig > cur:
-        percent_off = round(((orig - cur) / orig) * 100)
-        if percent_off > 0:
-            if is_pix_deal:
-                discount_line = f"🔥 <b>{percent_off}% OFF no Pix</b>\n\n"
-            else:
-                discount_line = f"🔥 <b>{percent_off}% OFF aplicado no item!</b>\n\n"
+        pct = round(((orig - cur) / orig) * 100)
+        if pct > 0:
+            disc_badge = f" <i>({pct}% OFF)</i>"
 
-    # --- 2. Preço e Parcelamento ---
-    price_line = ""
+    lines = [f"🔥 <b>{html.escape(short_title)}</b>"]
+
     note = f" {offer['price_note']}" if offer.get("price_note") else ""
-
     if cur is not None:
         if orig and orig > cur:
-            price_line += (
-                f"💰 <b>Preço:</b> de {_brl(orig)} por <b>{_brl(cur)}</b>{note}\n"
+            lines.append(
+                f"💰 De <s>{_brl(orig)}</s> por <b>{_brl(cur)}{note}</b>{disc_badge}"
             )
         else:
-            price_line += f"💰 <b>Preço:</b> <b>{_brl(cur)}</b>{note}\n"
-
-        if pix is not None and reg is not None and reg != pix:
-            price_line += f"💳 ou <b>{_brl(reg)}</b> em outros meios\n"
+            lines.append(f"💰 Por <b>{_brl(cur)}{note}</b>{disc_badge}")
 
         if inst_text:
-            price_line += f"💳 Parcelamento: <b>{html.escape(str(inst_text))}</b>\n"
-
-        price_line += "\n"
-
-    # --- 3. Loja ---
-    seller_line = ""
-    if offer.get("seller"):
-        seller_raw = offer["seller"].removeprefix("Por ").strip()
-
-        # Se já tiver "Oficial" ou "Loja", tratamos para ficar elegante
-        if "oficial" in seller_raw.lower():
-            seller_clean = html.escape(seller_raw)
-            seller_line = f"🏪 Loja: <b>{seller_clean} no Mercado Livre</b>\n\n"
-        else:
-            seller_clean = html.escape(seller_raw)
-            seller_line = f"🏪 Loja: <b>{seller_clean} no Mercado Livre</b>\n\n"
+            lines.append(f"💳 <i>{html.escape(str(inst_text))}</i>")
+        elif pix is not None and reg is not None and reg != pix:
+            lines.append(f"💳 <i>ou {_brl(reg)} em outros meios</i>")
     else:
-        seller_line = "🏪 Loja: <b>Mercado Livre</b>\n\n"
+        lines.append("💰 <i>Confira o preço promocional no link abaixo</i>")
 
-    # --- 4. Frete e Link de Ação ---
-    free_shipping = "🚚 <b>Aproveite frete grátis (conforme regras do app) e benefícios do Mercado Livre!</b>\n\n"
-    cta_line = f"👇 <b>Clique no link abaixo para garantir o seu:</b>\n👉 {aff_link}"
+    lines.append(f"\n🛒 <b>Compre no Mercado Livre:</b>\n👉 {aff_link}")
+    base_msg = "\n".join(lines)
 
-    base_msg = f"{header_title}{discount_line}{price_line}{seller_line}{free_shipping}{cta_line}"
-
-    # Se a Copy com IA estiver ativa nas Configurações (e não for apenas simulação dry-run), adiciona o gancho no topo!
-    if "PREVIA_SIMULACAO" not in aff_link:
-        from ai_copy_service import prepend_ai_hook_to_message
-
+    if "PREVIA_SIMULACAO" not in aff_link and raw_title:
         return prepend_ai_hook_to_message(
             base_message=base_msg,
-            title=raw_title or "Produto Mercado Livre",
+            title=short_title,
             current_price=cur,
             original_price=orig,
             discount_pct=discount_label,
@@ -195,5 +154,4 @@ def format_product_message(offer: dict, link: str | None = None) -> str:
 
 
 def preview_message(offer: dict) -> str:
-    """Alias que reaproveita a função única format_product_message."""
     return format_product_message(offer)

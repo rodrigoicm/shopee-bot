@@ -8,6 +8,7 @@ import requests
 import ml_offer
 from ml_affiliate import create_affiliate_link_full
 import ml_auto
+import amazon_service
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -42,6 +43,7 @@ SHOPEE_URL_PATTERN = (
     r"https?://(?:[a-zA-Z0-9-]+\.)?(?:shopee\.com\.br|shope\.ee|br\.shp\.ee)/[^\s]+"
 )
 ML_URL_PATTERN = r"https?://(?:[a-zA-Z0-9-]+\.)?(?:mercadolivre\.com\.br|mercadolivre\.com|mercadolibre\.com\.br|mercadolibre\.com|ml\.br|meli\.la)/[^\s]+"
+AMAZON_URL_PATTERN = amazon_service.AMAZON_URL_PATTERN
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -225,7 +227,14 @@ async def handle_gerar_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await status_msg.edit_text(
         f"✅ <b>{res['total_added']} novas ofertas</b> adicionadas na Fila ({today_str})!\n"
         f"• 🟠 Shopee: <b>{res['shopee_added']}</b>\n"
-        f"• 🟡 Mercado Livre: <b>{res['ml_added']}</b>",
+        f"• 🟠 Amazon: <b>{res['amazon_added']}</b>\n"
+        f"• 🟡 Mercado Livre: <b>{res['ml_added']}</b>"
+        + (
+            f"\n\n⚠️ <b>{len(res['amazon_fallbacks'])}</b> ofertas da Amazon usaram fallback "
+            f"(link longo, cookie expirado). Rode <code>curl_amazon_to_env.py</code> para renovar."
+            if res.get("amazon_fallbacks")
+            else ""
+        ),
         parse_mode="HTML",
     )
 
@@ -240,10 +249,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         l.rstrip(".,;:!?)\n") for l in re.findall(SHOPEE_URL_PATTERN, raw_text)
     ]
     ml_links = [l.rstrip(".,;:!?)\n") for l in re.findall(ML_URL_PATTERN, raw_text)]
+    amazon_links = [
+        l.rstrip(".,;:!?)\n") for l in re.findall(AMAZON_URL_PATTERN, raw_text)
+    ]
 
-    if not shopee_links and not ml_links:
+    if not shopee_links and not ml_links and not amazon_links:
         await update.message.reply_text(
-            "👋 Nenhum link válido da Shopee ou do Mercado Livre foi encontrado na mensagem.\n"
+            "👋 Nenhum link válido da Shopee, Mercado Livre ou Amazon foi encontrado na mensagem.\n"
             "💡 Dica: Use /gerar para adicionar ofertas automáticas na fila!"
         )
         return
@@ -254,6 +266,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["platform"] = "shopee"
         context.user_data["shopee_links"] = shopee_links
         context.user_data["raw_url"] = shopee_links[-1]
+        context.user_data["multiple_ml"] = False
+    elif amazon_links:
+        context.user_data["platform"] = "amazon"
+        context.user_data["amazon_links"] = amazon_links
+        context.user_data["raw_url"] = amazon_links[-1]
         context.user_data["multiple_ml"] = False
     else:
         context.user_data["platform"] = "mercadolivre"
@@ -280,16 +297,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     platform_name = (
-        "Shopee" if context.user_data["platform"] == "shopee" else "Mercado Livre"
+        "Shopee"
+        if context.user_data["platform"] == "shopee"
+        else (
+            "Amazon" if context.user_data["platform"] == "amazon" else "Mercado Livre"
+        )
     )
-    qtd_links = len(shopee_links) if shopee_links else len(ml_links)
+    qtd_links = (
+        len(shopee_links)
+        if shopee_links
+        else (len(amazon_links) if amazon_links else len(ml_links))
+    )
 
     await update.message.reply_text(
-        f"⚙️ <b>{qtd_links} Link(s) do {platform_name} identificado(s)!</b>\n\n"
+        f"⚙️ <b>{qtd_links} Link(s) da {platform_name} identificado(s)!</b>\n\n"
         "Qual o tipo de mensagem que você deseja formatar?\n\n"
         "• <b>CUPOM:</b> Converte todos os links ou gera card especial de Central de Cupons.\n"
         "• <b>OFERTA:</b> Mantém seu texto original e substitui cada link pelo seu respectivo link de afiliado.\n"
-        "• <b>LINK:</b> Gera copy completa via API (e inclui o link do cupom se houver mais de 1 link!).",
+        "• <b>LINK:</b> Gera copy completa com preço, foto e IA (e inclui link de cupom extra se houver mais de 1 link!).",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -318,6 +343,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     aff_link = None
     formatted_msg = ""
     category_tag = "Manual"
+    product_link = raw_url
 
     # ================= MERCADO LIVRE =================
     if platform == "mercadolivre":
@@ -360,6 +386,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if res.get("current_price") is not None:
                         main_ml_result = res
                         media_url = res.get("image_url") or media_url
+                        product_link = res.get("product_url") or orig_l
                     else:
                         coupon_ml_links.append(res["affiliate_url"])
                 else:
@@ -403,6 +430,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             aff_link = ml_result.get("affiliate_url")
             media_url = ml_result.get("image_url")
+            product_link = ml_result.get("product_url") or raw_url
 
             if choice == "type_link":
                 formatted_msg = ml_offer.format_product_message(ml_result, aff_link)
@@ -417,6 +445,92 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         escape_html(raw_url), aff_link
                     )
                     formatted_msg = f"{converted_text}\n\n{free_shipping_notice}"
+
+    # ================= AMAZON =================
+    elif platform == "amazon":
+        amazon_links = context.user_data.get("amazon_links", [raw_url])
+
+        # 1. Pega a foto EXCLUSIVAMENTE do primeiro link da lista
+        first_amz_res = await amazon_service.get_amazon_offer(amazon_links[0])
+        media_url = (first_amz_res or {}).get("image_url")
+        product_link = (first_amz_res or {}).get("product_url") or amazon_links[0]
+
+        # 2. Converte todos os links da mensagem em paralelo ou sequência
+        amz_offers = await amazon_service.get_multiple_amazon_offers(amazon_links)
+
+        url_map: dict[str, str] = {}
+        valid_product_offers: list[dict] = []
+        coupon_amz_links: list[str] = []
+
+        for orig_l, amz_res in zip(amazon_links, amz_offers):
+            conv = (amz_res or {}).get("affiliate_url") or orig_l
+            url_map[orig_l] = conv
+            if amz_res and (amz_res.get("title") or amz_res.get("current_price")):
+                valid_product_offers.append(amz_res)
+                aff_link = conv
+            else:
+                coupon_amz_links.append(conv)
+
+        main_amz_offer = (
+            first_amz_res
+            if (first_amz_res and first_amz_res.get("title"))
+            else (valid_product_offers[0] if valid_product_offers else {})
+        )
+        aff_link = aff_link or (main_amz_offer or {}).get("affiliate_url") or raw_url
+
+        if choice == "type_cupom":
+            category_tag = "Cupom Amazon"
+            if clean_base_text.strip() in amazon_links:
+                formatted_msg = ShopeeAffiliateAPI.format_coupon_page_message(
+                    aff_link, "Amazon"
+                )
+            else:
+                rewritten = escape_html(clean_base_text)
+                for orig_l, new_l in url_map.items():
+                    rewritten = rewritten.replace(escape_html(orig_l), new_l)
+                formatted_msg = rewritten
+
+        elif choice == "type_link":
+            category_tag = "Manual Amazon"
+            if len(valid_product_offers) >= 2:
+                formatted_msg = amazon_service.format_multi_variant_amazon_message(
+                    valid_product_offers
+                )
+            else:
+                formatted_msg = amazon_service.format_product_message(
+                    main_amz_offer,
+                    aff_link,
+                    extra_coupon_links=coupon_amz_links if coupon_amz_links else None,
+                )
+
+        else:
+            # choice == "type_oferta" (Manter Texto)
+            category_tag = "Manual Amazon"
+            if clean_base_text.strip() in amazon_links:
+                formatted_msg = amazon_service.format_product_message(
+                    main_amz_offer, aff_link
+                )
+            else:
+                rewritten = escape_html(clean_base_text)
+                for orig_l, new_l in url_map.items():
+                    rewritten = rewritten.replace(escape_html(orig_l), new_l)
+
+                prime_notice = "\n\n🚚 <b>Frete Grátis com Amazon Prime (ou conforme regras do app)!</b>"
+                if (
+                    "prime" not in rewritten.lower()
+                    and "frete" not in rewritten.lower()
+                ):
+                    rewritten += prime_notice
+
+                from ai_copy_service import prepend_ai_hook_to_message
+
+                title_for_ai = (main_amz_offer or {}).get("title") or "Produto Amazon"
+                formatted_msg = prepend_ai_hook_to_message(
+                    base_message=rewritten,
+                    title=title_for_ai,
+                    current_price=(main_amz_offer or {}).get("current_price"),
+                    store="Amazon",
+                )
 
     # ================= SHOPEE (USANDO O SERVIÇO UNIFICADO shopee_service.py) =================
     else:
@@ -554,11 +668,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["last_formatted_msg"] = formatted_msg
     context.user_data["last_media_url"] = media_url
     context.user_data["last_store"] = (
-        "Shopee" if platform == "shopee" else "Mercado Livre"
+        "Shopee"
+        if platform == "shopee"
+        else ("Amazon" if platform == "amazon" else "Mercado Livre")
     )
-    context.user_data["last_product_url"] = (
-        product_link if platform == "shopee" else raw_url
-    )
+    context.user_data["last_product_url"] = product_link
     context.user_data["last_category"] = category_tag
 
     keyboard = InlineKeyboardMarkup(
@@ -690,6 +804,7 @@ async def handle_whatsapp_dispatch(update: Update, context: ContextTypes.DEFAULT
             message_text,
             media_url,
         )
+        await asyncio.sleep(6)
         success_parceria = await send_whatsapp_offer(
             WHATSAPP_GROUP_PARCERIA,
             message_text,

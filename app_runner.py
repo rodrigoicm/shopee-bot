@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import uvicorn
+import random
 from shopee_service import ShopeeAffiliateAPI
 import os
 
@@ -41,6 +42,8 @@ from bot import (
 )
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 cuiaba_tz = timezone(timedelta(hours=-4))
@@ -165,9 +168,9 @@ async def background_dispatcher():
 
                 # Só sobrescreve a copy se for o template padrão da Shopee;
                 # se for um texto personalizado do Telegram (com múltiplos links ou cupom), preserva o texto!
-                is_standard_template = "💡 <b>POR QUE VALE A PENA?</b>" in (
+                is_standard_template = "🛒 <b>Compre na" in (
                     formatted_message or ""
-                )
+                ) or "💡 <b>POR QUE VALE A PENA?</b>" in (formatted_message or "")
                 if priority == 1 and store.lower() == "shopee" and is_standard_template:
                     fresh_msg, fresh_image = refresh_offer_data(product_url)
                     fresh_media = media_url if (is_video and media_url) else fresh_image
@@ -182,7 +185,7 @@ async def background_dispatcher():
                     fresh_media,
                     final_media_type,
                 )
-                await asyncio.sleep(2)
+                await asyncio.sleep(random.uniform(6.0, 10.0))
                 success_par = await send_whatsapp_offer(
                     WHATSAPP_GROUP_PARCERIA,
                     fresh_msg,

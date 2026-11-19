@@ -1,7 +1,7 @@
 """
-Serviço de Copywriting Inteligente via IA (Google Gemini Flash API).
-Gera chamadas curtas, persuasivas e únicas para o topo das ofertas (Shopee, ML e Amazon),
-calculando valor unitário em kits e destacando a diferença para o preço médio de mercado.
+Serviço de Copywriting Inteligente via IA (Google Gemini Flash API) e Limpeza de Títulos.
+Gera chamadas curtas de 1 linha (máx 85 chars) sem repetir o preço que já vai abaixo,
+e limpa palavras de spam/tradução automática dos títulos dos produtos.
 """
 
 import html
@@ -19,16 +19,43 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_GEMINI_MODEL: str | None = None
+_CACHED_MODELS_LIST: list[str] | None = None
+_LAST_WORKING_MODEL: str | None = None
+
+# Termos de spam de vendedores (especialmente Shopee internacional) para remover do título
+JUNK_TITLE_PATTERNS = [
+    r"\b202[2-7]\b",
+    r"\b(?:inverno\s+quente|quente\s+novo|novo\s+quente|anti-susto)\b",
+    r"\b(?:envio\s+imediato|pronta\s+entrega|envio\s+full|envio\s+r[aá]pido|envio\s+brasil)\b",
+    r"\b(?:promo[cç][aã]o|oferta\s+rel[aâ]mpago|queima\s+de\s+estoque|super\s+oferta|lan[cç]amento)\b",
+    r"【[^】]*】",
+    r"\[[^\]]*\]",
+]
+
+
+def clean_product_title(raw_title: str, max_len: int = 78) -> str:
+    """
+    Remove termos de spam/SEO ('2025 Inverno Quente Novo anti-Susto', 'Envio Imediato', etc.)
+    e corta o título de forma elegante em até `max_len` caracteres.
+    """
+    if not raw_title:
+        return "Produto em Oferta"
+
+    text = html.unescape(str(raw_title))
+    for pat in JUNK_TITLE_PATTERNS:
+        text = re.sub(pat, " ", text, flags=re.IGNORECASE)
+
+    # Remove barras/traços soltos no início ou fim e espaços duplicados
+    text = re.sub(r"\s+", " ", text).strip(" -–|/.,;:")
+
+    if len(text) > max_len:
+        text = text[:max_len].rsplit(" ", 1)[0].rstrip(" -–|/.,;:") + "..."
+
+    return text or "Produto em Oferta"
 
 
 @contextmanager
 def _force_ipv4_context():
-    """
-    Força resolução DNS via IPv4 temporariamente durante a chamada ao Google APIs.
-    Evita o bug clássico de Read Timeout em redes Windows onde a rota IPv6 para
-    generativelanguage.googleapis.com congela após o handshake TLS.
-    """
     orig_getaddrinfo = socket.getaddrinfo
 
     def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
@@ -42,12 +69,11 @@ def _force_ipv4_context():
 
 
 def ensure_ai_configs() -> None:
-    """Garante os parâmetros da IA na tabela config do SQLite."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     defaults = {
-        "ai_copy_enabled": "0",  # 0 = Desligado por padrão; 1 = Ligado
-        "ai_copy_style": "urgencia_comparativo",  # urgencia_comparativo | achadinho_amigavel | calculo_unitario
+        "ai_copy_enabled": "0",
+        "ai_copy_style": "urgencia_comparativo",
         "ai_copy_custom_prompt": "",
     }
     for k, v in defaults.items():
@@ -61,60 +87,100 @@ def ensure_ai_configs() -> None:
 ensure_ai_configs()
 
 
-def _discover_available_flash_models(api_key: str) -> list[str]:
-    """
-    Consulta diretamente na API do Google quais modelos 'flash' estão ativos
-    para esta chave de API, ordenando pelos mais rápidos e recentes.
-    """
+def _get_ordered_flash_models(api_key: str) -> list[str]:
+    global _CACHED_MODELS_LIST, _LAST_WORKING_MODEL
     env_model = os.environ.get("GEMINI_MODEL", "").strip()
     if env_model:
         return [env_model.replace("models/", "")]
 
+    if _CACHED_MODELS_LIST:
+        if _LAST_WORKING_MODEL and _LAST_WORKING_MODEL in _CACHED_MODELS_LIST:
+            return [_LAST_WORKING_MODEL] + [
+                m for m in _CACHED_MODELS_LIST if m != _LAST_WORKING_MODEL
+            ]
+        return _CACHED_MODELS_LIST
+
+    preferred_priority = [
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-2.0-flash",
+    ]
+
     url = "https://generativelanguage.googleapis.com/v1beta/models"
-    headers = {
-        "x-goog-api-key": api_key,
-        "Connection": "close",
-    }
+    headers = {"x-goog-api-key": api_key, "Connection": "close"}
+
     try:
         with _force_ipv4_context():
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = requests.get(url, headers=headers, timeout=8)
         if resp.status_code == 200:
             models_data = resp.json().get("models") or []
-            flash_models = []
+            available = set()
             for m in models_data:
                 name = (m.get("name") or "").replace("models/", "")
-                methods = m.get("supportedGenerationMethods") or []
-                if "generateContent" not in methods:
-                    continue
-                if (
-                    "flash" in name.lower()
-                    and "tts" not in name.lower()
-                    and "image" not in name.lower()
-                ):
-                    flash_models.append(name)
+                if "generateContent" in (m.get("supportedGenerationMethods") or []):
+                    if (
+                        "flash" in name.lower()
+                        and "tts" not in name.lower()
+                        and "image" not in name.lower()
+                    ):
+                        available.add(name)
+            final_list = [p for p in preferred_priority if p in available]
+            for other in sorted(available):
+                if other not in final_list:
+                    final_list.append(other)
+            if final_list:
+                _CACHED_MODELS_LIST = final_list[:6]
+                return _CACHED_MODELS_LIST
+    except Exception:
+        pass
 
-            # Prioriza modelos flash-lite ou flash padrão mais novos
-            flash_models.sort(
-                key=lambda x: (
-                    0 if "lite" in x else 1,
-                    0 if "3." in x or "2.0" in x else 1,
-                    x,
-                )
-            )
-            if flash_models:
-                logger.info(
-                    f"🤖 Modelos Gemini Flash detectados na conta: {flash_models[:4]}"
-                )
-                return flash_models[:4]
-    except Exception as e:
-        logger.warning(f"⚠️ Não foi possível listar modelos Gemini dinamicamente: {e}")
+    return preferred_priority[:5]
 
-    return [
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-3.8-flash",
-        "gemini-flash-latest",
+
+def _detect_multi_kit_title(title: str) -> list[int]:
+    if not title:
+        return []
+    m = re.search(
+        r"\b(?:kit|pack|combo|com|leve)?\s*(\d{1,3}(?:\s*[/|-]\s*\d{1,3})+|\d{1,3}\s+ou\s+\d{1,3})\b",
+        title,
+        re.IGNORECASE,
+    )
+    if not m:
+        return []
+    nums = [int(n) for n in re.findall(r"\d+", m.group(1)) if 1 <= int(n) <= 500]
+    return sorted(set(nums)) if len(nums) >= 2 else []
+
+
+def _calculate_exact_unit_price_in_python(
+    title: str, price: float | None
+) -> tuple[int | None, str | None]:
+    """
+    Calcula o preço por unidade no Python com precisão matemática exata
+    para impedir que a IA erre contas de divisão de cabeça (ex: Kit 12 por R$ 79,99 = R$ 6,67/un).
+    """
+    if not title or not price or price <= 0:
+        return None, None
+
+    # Se tiver múltiplos kits no título (ex: Kit 5/10), não calcula valor único
+    if _detect_multi_kit_title(title):
+        return None, None
+
+    patterns = [
+        r"\b(?:kit|pack|caixa|cx|combo|fardo|leve|pague)\s*(?:com\s*|c/\s*)?(\d{1,4})\b",
+        r"\b(\d{1,4})\s*(?:unidades|unidade|unid\.?|un\.?|peças|pecas|pares|fraldas|tiras|cápsulas|capsulas|sachês|saches|latas|garrafas|pacotes|rolos|folhas)\b",
     ]
+    for pat in patterns:
+        m = re.search(pat, title, re.IGNORECASE)
+        if m:
+            qty = int(m.group(1))
+            # Evita confundir ml/gramas/voltagem (ex: 250ml, 110v) com quantidade de itens
+            if 2 <= qty <= 600:
+                unit_val = float(price) / qty
+                if unit_val >= 0.05:
+                    return qty, f"R$ {unit_val:.2f}".replace(".", ",")
+    return None, None
 
 
 def generate_ai_hook(
@@ -125,13 +191,10 @@ def generate_ai_hook(
     store: str = "Shopee",
     sales: int | str | None = None,
     force: bool = False,
+    max_price: float | str | None = None,
+    is_starting_price: bool = False,
 ) -> str:
-    """
-    Consulta a IA para criar uma chamada curta (1 a 2 linhas) para o topo da oferta.
-    Retorna string formatada em HTML (ex: '<b>🚨 Corre que baixou muito!...</b>')
-    ou '' (vazio) se a IA estiver desativada ou sem chave configurada.
-    """
-    global _ACTIVE_GEMINI_MODEL
+    global _LAST_WORKING_MODEL
 
     if not force and get_config("ai_copy_enabled") != "1":
         return ""
@@ -143,49 +206,54 @@ def generate_ai_hook(
     style = get_config("ai_copy_style") or "urgencia_comparativo"
     custom_instructions = (get_config("ai_copy_custom_prompt") or "").strip()
 
-    style_guidelines = {
-        "urgencia_comparativo": (
-            "Use tom de urgência e oportunidade real ('Corre que tá muito barato', 'Preço despencou', 'Vai acabar rápido'). "
-            "Compare com o preço normal de mercado ou destaque a economia real sem inventar números absurdos."
-        ),
-        "achadinho_amigavel": (
-            "Use tom de recomendação entusiasmada de grupo VIP de promoções ('Olha esse achadinho', 'Vale cada centavo', 'Compensa demais')."
-        ),
-        "calculo_unitario": (
-            "Se for um Kit, Pack, Fralda ou conjunto com várias unidades, calcule e destaque quanto sai cada unidade! "
-            "Se for produto único, destaque o custo-benefício pelo preço atual."
-        ),
-    }.get(style, "Use tom de urgência e destaque o custo-benefício.")
+    has_price = bool(current_price)
+    p_val = float(current_price) if has_price else 0.0
+    multi_kit_nums = _detect_multi_kit_title(title)
+    has_range = bool(
+        is_starting_price
+        or (max_price and has_price and abs(float(max_price) - p_val) > 0.05)
+    )
 
-    price_info = (
-        f"R$ {float(current_price):.2f}".replace(".", ",")
-        if current_price
-        else "em promoção"
+    # Calcula o preço unitário no Python com 100% de precisão!
+    exact_qty, exact_unit_str = (
+        _calculate_exact_unit_price_in_python(title, p_val)
+        if (has_price and not has_range and not multi_kit_nums)
+        else (None, None)
     )
-    orig_info = (
-        f"R$ {float(original_price):.2f}".replace(".", ",")
-        if original_price
-        else "não informado"
-    )
-    disc_info = f"{discount_pct}%" if discount_pct else "não informado"
-    sales_info = f"{sales} vendidos" if sales else ""
+
+    rules = [
+        "- MÁXIMO de 80 caracteres (1 linha rápida para leitura instantânea no celular).",
+        "- NÃO repita o nome completo do produto e NÃO repita o preço total (pois o preço total já está logo abaixo).",
+    ]
+
+    if exact_qty and exact_unit_str and p_val <= 250.0:
+        style_hint = f"Destaque que neste kit com {exact_qty} unidades cada unidade sai por APENAS {exact_unit_str}!"
+        rules.append(
+            f"- ⚠️ MATEMÁTICA EXATA JÁ CALCULADA: São {exact_qty} unidades e cada unidade sai por EXATAMENTE {exact_unit_str}. "
+            f"Se citar valor por unidade, use OBRIGATORIAMENTE {exact_unit_str} (PROIBIDO inventar outro valor!)."
+        )
+    else:
+        style_hint = "Crie 1 frase curtíssima e magnética focada no benefício e urgência da oferta."
+        rules.append(
+            "- ⚠️ REGRA CRÍTICA: PROIBIDO citar qualquer valor em R$ e PROIBIDO fazer contas de divisão! Foque 100% na qualidade/oportunidade do produto."
+        )
 
     prompt = (
-        "Você é um copywriter brasileiro de grupos de promoções no WhatsApp.\n"
-        "Escreva APENAS 1 frase curta e magnética (máximo 135 caracteres) para o topo desta oferta:\n"
-        f"- Produto: {title}\n"
-        f"- Loja: {store} | Preço Agora: {price_info} | Preço Antigo: {orig_info} | Desconto: {disc_info} {sales_info}\n"
-        f"- Estilo: {style_guidelines}\n"
-        "- Se for Kit/Pack com várias unidades, calcule e cite quanto sai cada unidade.\n"
-        f"{f'- Extra: {custom_instructions}' if custom_instructions else ''}\n"
-        "Regras: Comece com 1 emoji (🚨, 😱, ⚡, 💥). Não repita o nome inteiro do produto. Sem links, sem hashtags e sem aspas."
+        "Você é um copywriter de grupos VIP de ofertas no WhatsApp.\n"
+        "Escreva APENAS 1 chamada curta (máximo 80 caracteres) para o topo desta oferta:\n"
+        f"- Produto: {clean_product_title(title, 80)}\n"
+        f"- Diretriz: {style_hint}\n"
+        + "\n".join(rules)
+        + (f"\n- Extra: {custom_instructions}" if custom_instructions else "")
+        + "\nComece com 1 emoji (🚨, 😱, ⚡, 💥, 😍). Sem links, sem hashtags e sem aspas."
     )
 
-    payload = {
+    payload_fast = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 200,
+            "temperature": 0.45,
+            "maxOutputTokens": 100,
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
 
@@ -194,33 +262,16 @@ def generate_ai_hook(
         "x-goog-api-key": api_key,
         "Connection": "close",
     }
-
-    models_to_try = (
-        [_ACTIVE_GEMINI_MODEL]
-        if _ACTIVE_GEMINI_MODEL
-        else _discover_available_flash_models(api_key)
-    )
+    models_to_try = _get_ordered_flash_models(api_key)
 
     for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         try:
             with _force_ipv4_context():
                 resp = requests.post(
-                    url, headers=headers, json=payload, timeout=(5, 12)
+                    url, headers=headers, json=payload_fast, timeout=(4, 8)
                 )
-
-            if resp.status_code == 404:
-                m_sug = re.search(r"models/(gemini-[a-zA-Z0-9.-]+)", resp.text)
-                if m_sug:
-                    suggested = m_sug.group(1)
-                    if suggested not in models_to_try:
-                        models_to_try.append(suggested)
-                continue
-
             if resp.status_code != 200:
-                logger.warning(
-                    f"⚠️ Aviso API Gemini ({model_name} - HTTP {resp.status_code}): {resp.text[:180]}"
-                )
                 continue
 
             data = resp.json()
@@ -232,22 +283,15 @@ def generate_ai_hook(
             raw_hook = "".join(
                 p.get("text", "") for p in parts if not p.get("thought")
             ).strip()
-
             raw_hook = raw_hook.strip("\"'").replace("**", "").replace("*", "").strip()
             raw_hook = " ".join(raw_hook.splitlines()).strip()
 
             if not raw_hook:
                 continue
 
-            _ACTIVE_GEMINI_MODEL = model_name
-
-            return (
-                f"💬 <i>{html.escape(raw_hook)}</i>"
-                if not re.match(r"^[^\w\s]", raw_hook)
-                else f"<b>{html.escape(raw_hook)}</b>"
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ Falha ao gerar gancho com IA ({model_name}): {e}")
+            _LAST_WORKING_MODEL = model_name
+            return f"<b>{html.escape(raw_hook)}</b>"
+        except Exception:
             continue
 
     return ""
@@ -262,11 +306,9 @@ def prepend_ai_hook_to_message(
     store: str = "Shopee",
     sales: int | str | None = None,
     force: bool = False,
+    max_price: float | str | None = None,
+    is_starting_price: bool = False,
 ) -> str:
-    """
-    Gera o gancho com IA (se ativo) e o insere no topo da mensagem formatada.
-    Se a mensagem já tiver um gancho ou se a IA estiver desligada, retorna a mensagem original intacta.
-    """
     hook = generate_ai_hook(
         title=title,
         current_price=current_price,
@@ -275,6 +317,8 @@ def prepend_ai_hook_to_message(
         store=store,
         sales=sales,
         force=force,
+        max_price=max_price,
+        is_starting_price=is_starting_price,
     )
     if not hook:
         return base_message

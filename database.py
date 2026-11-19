@@ -55,6 +55,21 @@ def init_db():
         "auto_keywords": "",  # Palavras-chave opcionais separadas por vírgula
     }
 
+    # ── Configs da Amazon (defaults seguros para retrocompat) ──
+    amazon_configs = {
+        "amazon_auto_enabled": "0",  # (A) desligado até ativar
+        "mix_amazon_pct": "0",  # (A) mantém 60/40
+        "amazon_bestsellers_pct": "60",  # % de DEALS dentro da Amazon (label invertido)
+        "amazon_target_categories": "eletronicos, celulares, cozinha, casa, beleza, ferramentas",
+        "amazon_bestsellers_url": "https://www.amazon.com.br/gp/bestsellers",
+        "amazon_deals_url": "https://www.amazon.com.br/blackfriday",
+    }
+
+    for k, v in amazon_configs.items():
+        cursor.execute(
+            "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", (k, v)
+        )
+
     for key, val in default_configs.items():
         cursor.execute(
             "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", (key, val)
