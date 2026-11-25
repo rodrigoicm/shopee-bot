@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Request, Form, Query
 from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import sqlite3
 import os
 import re
@@ -10,7 +12,7 @@ import html
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from database import DB_NAME, get_config, update_config, add_to_queue, delete_offer
-from shopee_service import ShopeeAffiliateAPI, SHOPEE_CATEGORIES
+from shopee_service import ShopeeAffiliateAPI
 import ml_offer
 import offer_comparator
 import ml_auto
@@ -35,6 +37,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PromoCuiabá — Plataforma de Automação de Ofertas")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 offer_comparator.ensure_comparator_configs()
 ml_auto.ensure_ml_auto_schema()
@@ -269,6 +273,8 @@ async def dashboard(
     cfg_sub: str = Query("geral"),
     comp_days: int = Query(None),
     comp_store: str = Query("all"),
+    comp_search: str = Query(""),
+    comp_page: int = Query(1),
     cleaned_count: int = Query(None),
     blocked_term: str = Query(None),
     purged_count: int = Query(None),
@@ -282,6 +288,9 @@ async def dashboard(
     ml_approved: int = Query(None),
     saved_cfg: str = Query(None),
     ai_updated: int = Query(None),
+    synced_cats: int = Query(None),
+    synced_store: str = Query("Shopee"),
+    deleted_pending: int = Query(None),
 ):
     cuiaba_tz = timezone(timedelta(hours=-4))
     now_dt = datetime.now(cuiaba_tz)
@@ -293,8 +302,10 @@ async def dashboard(
             url=f"/?tab=laboratorio&lab_sub=ml&selected_date={current_date}",
             status_code=303,
         )
-    if cfg_sub == "ml":
-        cfg_sub = "mix"
+    if cfg_sub == "mix":
+        cfg_sub = "geral"
+    if cfg_sub not in ("geral", "shopee", "ml", "amazon", "ia", "dedup"):
+        cfg_sub = "geral"
     if lab_sub not in ("shopee", "amazon", "ml"):
         lab_sub = "shopee"
 
@@ -330,6 +341,14 @@ async def dashboard(
     ai_enabled = configs.get("ai_copy_enabled", "0") == "1"
     ai_style = configs.get("ai_copy_style", "urgencia_comparativo")
     ai_custom_prompt = configs.get("ai_copy_custom_prompt", "")
+    ai_model = configs.get("ai_copy_model", "gemini-2.5-flash")
+    ai_models_updated_at = configs.get("ai_models_updated_at", "Ainda não testado")
+    ai_models_list = ai_copy_service.get_cached_gemini_models()
+    ai_model_options_html = "".join(
+        f'<option value="{html.escape(m["id"])}" {"selected" if m["id"] == ai_model else ""}>'
+        f'{html.escape(m.get("label") or m["id"])}</option>'
+        for m in ai_models_list
+    )
 
     if not in_window:
         timer_status_text = f"Fora do horário ({start_str}–{end_str})"
@@ -351,7 +370,12 @@ async def dashboard(
     elif pending_offers > 0 and current_date == today_str:
         timer_status_text = "Pronto (< 30s)"
 
-    # ───────────── Configs Shopee (Categorias + Termos Excluídos + Lab) ─────────────
+    # ───────────── Configs Globais / Anti-Repetição ─────────────
+    dedup_days_cfg = int(configs.get("dedup_history_days", "7"))
+    dedup_thresh_cfg = float(configs.get("dedup_similarity_threshold", "60"))
+    blocked_terms_cfg = configs.get("dedup_blocked_terms", "")
+
+    # ───────────── Configs Shopee ─────────────
     shopee_gen_pct = int(configs.get("shopee_general_pct", "30"))
     shopee_cat_pct = 100 - shopee_gen_pct
     shopee_target_cats_raw = configs.get(
@@ -363,26 +387,35 @@ async def dashboard(
     ]
     shopee_target_cats_lower = {c.lower() for c in shopee_target_cats_list}
     shopee_blocked_terms_raw = configs.get("shopee_blocked_terms", "")
+    shopee_cats_updated_at = configs.get(
+        "shopee_categories_updated_at", "Ainda não sincronizado (usando padrão)"
+    )
+
+    available_shopee_cats = ShopeeAffiliateAPI.get_available_shopee_categories()
 
     shopee_cat_checkboxes_html = ""
     shopee_cat_lab_html = ""
     known_shopee_cats_lower = set()
-    for idx, cat_label in enumerate(SHOPEE_CATEGORIES.keys()):
+    for idx, (cat_label, cat_meta) in enumerate(available_shopee_cats.items()):
         known_shopee_cats_lower.add(cat_label.lower())
         is_checked = "checked" if cat_label.lower() in shopee_target_cats_lower else ""
+        sub_list = (
+            (cat_meta.get("subterms") or []) if isinstance(cat_meta, dict) else []
+        )
+        sub_preview = ", ".join(sub_list[:6])
         shopee_cat_checkboxes_html += f"""
         <div class="col-md-3 col-sm-6">
-            <div class="form-check">
+            <div class="form-check" title="Subcategorias: {html.escape(sub_preview)}">
                 <input class="form-check-input" type="checkbox" name="shopee_cat_checks" value="{html.escape(cat_label)}" id="shpCat{idx}" {is_checked}>
-                <label class="form-check-label small" for="shpCat{idx}">{html.escape(cat_label)}</label>
+                <label class="form-check-label small" for="shpCat{idx}">{html.escape(cat_label)} <span class="text-muted" style="font-size:0.7rem;">({len(sub_list)})</span></label>
             </div>
         </div>
         """
         shopee_cat_lab_html += f"""
         <div class="col-md-3 col-sm-6">
-            <div class="form-check">
+            <div class="form-check" title="Subcategorias: {html.escape(sub_preview)}">
                 <input class="form-check-input" type="checkbox" name="cats" value="{html.escape(cat_label)}" id="labShpCat{idx}" {is_checked}>
-                <label class="form-check-label small" for="labShpCat{idx}">{html.escape(cat_label)}</label>
+                <label class="form-check-label small" for="labShpCat{idx}">{html.escape(cat_label)} <span class="text-muted" style="font-size:0.7rem;">({len(sub_list)})</span></label>
             </div>
         </div>
         """
@@ -403,7 +436,7 @@ async def dashboard(
         mix_parts.append(f"{mix_ml_pct}% ML")
     mix_label = " / ".join(mix_parts)
 
-    # Configs Mercado Livre
+    # ───────────── Configs Mercado Livre (Categorias + Subcategorias Expansíveis) ─────────────
     ml_best_pct = int(configs.get("ml_best_sellers_pct", "30"))
     ml_offers_pct = 100 - ml_best_pct
     ml_hist_days = configs.get("ml_history_days", "7")
@@ -420,14 +453,102 @@ async def dashboard(
     ml_pages_per_run = configs.get("ml_pages_per_run", "4")
     ml_max_page_pool = configs.get("ml_max_page_pool", "15")
 
-    excl_bestsellers_raw = configs.get(
-        "ml_excluded_categories_bestsellers", "Games, Informática"
+    ml_target_cats_raw = configs.get(
+        "ml_target_categories", ml_auto.DEFAULT_ML_TARGET_CATEGORIES
     )
-    excl_bestsellers_list = ml_auto.parse_csv_list(excl_bestsellers_raw)
-    excl_bestsellers_norm = {ml_auto._normalize_text(x) for x in excl_bestsellers_list}
+    ml_target_cats_list = ml_auto.parse_ml_categories_list(ml_target_cats_raw)
+    ml_target_cats_norm = {ml_auto._normalize_text(x) for x in ml_target_cats_list}
+
+    ml_target_subcats_raw = configs.get("ml_target_subcategories", None)
+    ml_has_subcats_saved = ml_target_subcats_raw is not None
+    ml_target_subcats_set = {
+        s.strip() for s in (ml_target_subcats_raw or "").split(";") if s.strip()
+    }
+
+    ml_cats_updated_at = configs.get(
+        "ml_categories_updated_at", "Ainda não sincronizado (usando padrão)"
+    )
     excl_offers_raw = configs.get("ml_excluded_categories_offers", "")
 
-    # Configs Amazon
+    available_ml_cats = ml_auto.get_available_ml_categories()
+    ml_cat_tree_html = ""
+    ml_cat_lab_html = ""
+    known_norm_set = set()
+
+    for idx, (cat_name, cat_meta) in enumerate(available_ml_cats.items()):
+        c_norm = ml_auto._normalize_text(cat_name)
+        known_norm_set.add(c_norm)
+        is_parent_checked = c_norm in ml_target_cats_norm
+        children = (cat_meta or {}).get("children") or []
+
+        sub_items_html = ""
+        checked_sub_count = 0
+        for s_idx, ch in enumerate(children):
+            ch_id = str(ch.get("id") or "").strip()
+            ch_name = str(ch.get("name") or "").strip()
+            if not ch_id or not ch_name:
+                continue
+            if ml_has_subcats_saved:
+                sub_checked = ch_id in ml_target_subcats_set
+            else:
+                sub_checked = is_parent_checked
+            if sub_checked:
+                checked_sub_count += 1
+            sub_items_html += f"""
+            <div class="col-6">
+                <div class="form-check">
+                    <input class="form-check-input ml-sub-check-{idx}" type="checkbox" name="ml_subcat_checks" value="{html.escape(ch_id)}" id="mlSub{idx}_{s_idx}" data-parent-idx="{idx}" onchange="syncMlParentFromChild(this)" {"checked" if sub_checked else ""}>
+                    <label class="form-check-label" style="font-size:0.78rem;" for="mlSub{idx}_{s_idx}">{html.escape(ch_name)}</label>
+                </div>
+            </div>
+            """
+
+        if children:
+            toggle_btn_html = f"""
+            <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none text-secondary" data-bs-toggle="collapse" data-bs-target="#mlSubCollapse{idx}" style="font-size:0.75rem;">
+                ▾ Subcategorias (<span id="mlSubCount{idx}">{checked_sub_count}/{len(children)}</span>)
+            </button>
+            """
+            collapse_box_html = f"""
+            <div class="collapse mt-2 pt-2 border-top" id="mlSubCollapse{idx}">
+                <div class="row g-1 ps-2">{sub_items_html}</div>
+            </div>
+            """
+        else:
+            toggle_btn_html = '<span class="text-muted" style="font-size:0.72rem;">(sincronize para ver subcategorias)</span>'
+            collapse_box_html = ""
+
+        ml_cat_tree_html += f"""
+        <div class="col-md-6">
+            <div class="p-2 bg-white border rounded h-100">
+                <div class="d-flex justify-content-between align-items-center gap-2">
+                    <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" name="ml_cat_checks" value="{html.escape(cat_name)}" id="mlCatCheck{idx}" data-cat-idx="{idx}" onchange="toggleMlParent(this)" {"checked" if is_parent_checked else ""}>
+                        <label class="form-check-label small fw-semibold" for="mlCatCheck{idx}">{html.escape(cat_name)}</label>
+                    </div>
+                    {toggle_btn_html}
+                </div>
+                {collapse_box_html}
+            </div>
+        </div>
+        """
+
+        ml_cat_lab_html += f"""
+        <div class="col-md-3 col-sm-6">
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="cats" value="{html.escape(cat_name)}" id="labMlCat{idx}" {"checked" if is_parent_checked else ""}>
+                <label class="form-check-label small" for="labMlCat{idx}">{html.escape(cat_name)}</label>
+            </div>
+        </div>
+        """
+
+    custom_ml_cats_str = "; ".join(
+        c
+        for c in ml_target_cats_list
+        if ml_auto._normalize_text(c) not in known_norm_set
+    )
+
+    # ───────────── Configs Amazon ─────────────
     amazon_deals_pct = int(configs.get("amazon_bestsellers_pct", "60"))
     amazon_bestsellers_pct = 100 - amazon_deals_pct
     amazon_hist_days = configs.get("amazon_history_days", "7")
@@ -477,6 +598,8 @@ async def dashboard(
         alert_html = '<div class="alert alert-success shadow-sm border-0 py-2">🎬 Oferta salva com <b>VÍDEO (.mp4)</b> com sucesso!</div>'
     elif video_msg == "fallback":
         alert_html = '<div class="alert alert-warning shadow-sm border-0 py-2">⚠️ Vídeo não detectado; oferta salva com a <b>Imagem</b> padrão.</div>'
+    elif deleted_pending is not None:
+        alert_html = f'<div class="alert alert-danger shadow-sm border-0 py-2">🗑️ <b>{deleted_pending} oferta(s) pendente(s)</b> de {current_date} foram excluídas da fila!</div>'
     elif cleaned_count is not None:
         alert_html = f'<div class="alert alert-success shadow-sm border-0 py-2">🧹 Limpeza concluída: <b>{cleaned_count} ofertas duplicadas pendentes</b> removidas!</div>'
     elif blocked_term:
@@ -493,9 +616,15 @@ async def dashboard(
     elif ml_approved is not None:
         label_map = {"shopee": "Shopee", "amazon": "Amazon", "ml": "Mercado Livre"}
         label = label_map.get(lab_sub, "Laboratório")
-        alert_html = f'<div class="alert alert-success shadow-sm border-0 py-2">✅ <b>{ml_approved} oferta(s) da {label}</b> convertida(s) e adicionada(s) à fila de {current_date}!</div>'
+        alert_html = f'<div class="alert alert-success shadow-sm border-0 py-2">✅ <b>{ml_approved} oferta(s) ({label})</b> convertida(s) e adicionada(s) à fila de {current_date}!</div>'
     elif saved_cfg:
         alert_html = '<div class="alert alert-success shadow-sm border-0 py-2">💾 Configurações salvas com sucesso!</div>'
+    elif synced_cats is not None:
+        s_lbl = html.escape(synced_store or "Plataforma")
+        if synced_cats > 0:
+            alert_html = f'<div class="alert alert-success shadow-sm border-0 py-2">🔄 <b>{synced_cats} categorias oficiais ({s_lbl})</b> foram buscadas e atualizadas com sucesso!</div>'
+        else:
+            alert_html = f'<div class="alert alert-warning shadow-sm border-0 py-2">⚠️ Não foi possível atualizar as categorias de {s_lbl} agora; mantendo lista em cache.</div>'
     elif ai_updated is not None:
         if ai_updated > 0:
             alert_html = f'<div class="alert alert-info shadow-sm border-0 py-2">✨ <b>Copy com IA gerada e aplicada em {ai_updated} oferta(s)!</b> Clique em "👁️ Ver" na fila para conferir.</div>'
@@ -505,9 +634,6 @@ async def dashboard(
     now_ts = time.time()
 
     # Comparador (cache 30s)
-    dedup_days_cfg = int(configs.get("dedup_history_days", "7"))
-    dedup_thresh_cfg = float(configs.get("dedup_similarity_threshold", "60"))
-    blocked_terms_cfg = configs.get("dedup_blocked_terms", "")
     scan_days = comp_days if comp_days is not None else max(14, dedup_days_cfg)
     comp_cache_key = (
         f"{scan_days}_{dedup_thresh_cfg}_{comp_store}_{total_offers}_{cleaned_count}"
@@ -590,8 +716,10 @@ async def dashboard(
         lab_sub_map[k] = ("show active", "active") if k == lab_sub else ("", "")
 
     cfg_sub_map = {
-        "geral": ("show active", "active"),
-        "mix": ("", ""),
+        "geral": ("", ""),
+        "shopee": ("", ""),
+        "ml": ("", ""),
+        "amazon": ("", ""),
         "ia": ("", ""),
         "dedup": ("", ""),
     }
@@ -669,7 +797,7 @@ async def dashboard(
                 badge_cat = f"<span class='badge bg-danger-subtle text-danger border border-danger-subtle'>{html.escape(cat_str)}</span>"
             elif "infantil" in cat_low:
                 badge_cat = f"<span class='badge bg-info-subtle text-info-emphasis border border-info-subtle'>{html.escape(cat_str)}</span>"
-            elif "ml:" in cat_low or "amazon:" in cat_low:
+            elif "ml:" in cat_low or "ml ⚡" in cat_low or "amazon:" in cat_low:
                 badge_cat = f"<span class='badge bg-warning-subtle text-dark border border-warning'>{html.escape(cat_str)}</span>"
             elif "mais vendidos" in cat_low or "top" in cat_low:
                 badge_cat = f"<span class='badge bg-primary-subtle text-primary border border-primary-subtle'>{html.escape(cat_str)}</span>"
@@ -725,6 +853,8 @@ async def dashboard(
                         data-offer-id="{item_id}"
                         data-suggested="{html.escape(suggested_term)}"
                         data-title="{html.escape(title_extracted)}"
+                        data-return-tab="fila"
+                        data-return-lab="shopee"
                         onclick="blockTermFromQueueBtn(this)"
                         title="Adicionar palavra à lista de exclusão e remover da fila">
                         🚫 Termo
@@ -758,7 +888,7 @@ async def dashboard(
             </tr>
             """
 
-    # ───────────── HTML: LABORATÓRIO SHOPEE (NOVO!) ─────────────
+    # ───────────── HTML: LABORATÓRIO SHOPEE ─────────────
     shopee_lab_data = _PORTAL_CACHE.get("shopee_lab")
     shopee_lab_results_html = ""
     if not shopee_lab_data:
@@ -817,6 +947,8 @@ async def dashboard(
                                     data-offer-id="0"
                                     data-suggested="{html.escape(sug_kw)}"
                                     data-title="{c_title}"
+                                    data-return-tab="laboratorio"
+                                    data-return-lab="shopee"
                                     onclick="blockTermFromQueueBtn(this)"
                                     title="Bloquear termo indesejado">
                                     🚫 Termo
@@ -934,6 +1066,7 @@ async def dashboard(
                 if cand.get("rating")
                 else ""
             )
+            sug_kw = _suggest_first_keyword(cand.get("title", ""))
 
             amz_cards_html += f"""
             <div class="col-md-6">
@@ -953,6 +1086,16 @@ async def dashboard(
                                     📝 Ver Mensagem
                                 </button>
                                 <a href="{c_url}" target="_blank" class="btn btn-sm btn-outline-secondary">🔗 Ver na Amazon</a>
+                                <button type="button" class="btn btn-sm btn-outline-danger"
+                                    data-offer-id="0"
+                                    data-suggested="{html.escape(sug_kw)}"
+                                    data-title="{c_title}"
+                                    data-return-tab="laboratorio"
+                                    data-return-lab="amazon"
+                                    onclick="blockTermFromQueueBtn(this)"
+                                    title="Bloquear termo indesejado">
+                                    🚫 Termo
+                                </button>
                                 <form action="/amazon-lab/approve-one" method="POST" class="d-inline">
                                     <input type="hidden" name="item_index" value="{idx}">
                                     <input type="hidden" name="target_date" value="{current_date}">
@@ -1023,7 +1166,7 @@ async def dashboard(
             <div class="card-body">
                 <div class="fs-2 mb-2">🧪</div>
                 <h5 class="fw-bold mb-1">Nenhuma simulação ML carregada</h5>
-                <p class="mb-0 text-muted small">Clique em <b>"🔍 Simular ML"</b> acima para coletar produtos segundo os parâmetros configurados.</p>
+                <p class="mb-0 text-muted small">Marque as categorias desejadas acima e clique em <b>"🔍 Simular ML"</b> para coletar produtos.</p>
             </div>
         </div>
         """
@@ -1034,10 +1177,10 @@ async def dashboard(
         )
         blk_cats_badges = (
             " ".join(
-                f"<span class='badge bg-danger'>{html.escape(c)}</span>"
+                f"<span class='badge bg-secondary'>{html.escape(c)}</span>"
                 for c in ml_lab_data["blocked_categories"]
             )
-            or "<span class='text-muted small'>Nenhuma encontrada</span>"
+            or "<span class='text-muted small'>Nenhuma ignorada</span>"
         )
         ml_cards_html = ""
         for idx, cand in enumerate(ml_lab_data["items"]):
@@ -1061,6 +1204,8 @@ async def dashboard(
                 if cand.get("pix_price")
                 else ""
             )
+            sug_kw = _suggest_first_keyword(cand.get("title", ""))
+
             ml_cards_html += f"""
             <div class="col-md-6">
                 <div class="card h-100 shadow-sm border-0 border-start border-warning border-4">
@@ -1075,6 +1220,16 @@ async def dashboard(
                             <div class="d-flex gap-2 flex-wrap">
                                 <button type="button" class="btn btn-sm btn-outline-dark" data-bs-toggle="modal" data-bs-target="#modalLab{idx}">📝 Ver Mensagem</button>
                                 <a href="{c_url}" target="_blank" class="btn btn-sm btn-outline-secondary">🔗 Ver no ML</a>
+                                <button type="button" class="btn btn-sm btn-outline-danger"
+                                    data-offer-id="0"
+                                    data-suggested="{html.escape(sug_kw)}"
+                                    data-title="{c_title}"
+                                    data-return-tab="laboratorio"
+                                    data-return-lab="ml"
+                                    onclick="blockTermFromQueueBtn(this)"
+                                    title="Bloquear termo indesejado">
+                                    🚫 Termo
+                                </button>
                                 <form action="/ml-lab/approve-one" method="POST" class="d-inline">
                                     <input type="hidden" name="item_index" value="{idx}">
                                     <input type="hidden" name="target_date" value="{current_date}">
@@ -1105,13 +1260,13 @@ async def dashboard(
                 <div class="row align-items-center">
                     <div class="col-md-9 small">
                         <div><b>⏱️ Tempo:</b> {ml_lab_data['elapsed_ms']} ms | <b>📦 Pool Mais Vendidos:</b> {ml_lab_data['raw_best_count']} | <b>📦 Pool Ofertas:</b> {ml_lab_data['raw_offers_count']} | <b>🛡️ Repetidos:</b> {ml_lab_data['skipped_duplicates']}</div>
-                        <div class="mt-1"><b>🚫 Categorias Bloqueadas:</b> {blk_cats_badges}</div>
                         <div class="mt-1"><b>✅ Categorias Lidas:</b> {acc_cats_badges}</div>
+                        <div class="mt-1"><b>⏭️ Categorias Não Selecionadas:</b> {blk_cats_badges}</div>
                     </div>
                     <div class="col-md-3 text-end">
                         <form action="/ml-lab/approve-all" method="POST">
                             <input type="hidden" name="target_date" value="{current_date}">
-                            <button type="submit" class="btn btn-warning fw-bold w-100">🚀 Enfileirar Todos ({len(ml_lab_data['items'])})</button>
+                            <button type="submit" class="btn btn-warning fw-bold w-100" {"disabled" if not ml_lab_data.get('items') else ""}>🚀 Enfileirar Todos ({len(ml_lab_data['items'])})</button>
                         </form>
                     </div>
                 </div>
@@ -1121,18 +1276,45 @@ async def dashboard(
         """
 
     # ───────────── HTML: COMPARADOR ─────────────
+    comp_search_clean = (comp_search or "").strip().lower()
+    all_clusters = comp_report["clusters"]
+    if comp_search_clean:
+        filtered_clusters = [
+            cl
+            for cl in all_clusters
+            if comp_search_clean in (cl["canonical_title"] or "").lower()
+            or comp_search_clean in (cl["signature"] or "").lower()
+            or any(
+                comp_search_clean in (it.get("title") or "").lower()
+                or comp_search_clean in (it.get("product_url") or "").lower()
+                for it in cl["items"]
+            )
+        ]
+    else:
+        filtered_clusters = all_clusters
+
+    comp_per_page = 10
+    comp_filtered_total = len(filtered_clusters)
+    comp_total_pages = max(
+        1, (comp_filtered_total + comp_per_page - 1) // comp_per_page
+    )
+    comp_page = max(1, min(comp_page, comp_total_pages))
+    page_clusters = filtered_clusters[
+        (comp_page - 1) * comp_per_page : comp_page * comp_per_page
+    ]
+
     clusters_html = ""
-    if not comp_report["clusters"]:
+    if not page_clusters:
         clusters_html = """
         <div class="card border-0 shadow-sm text-center py-5">
             <div class="card-body">
                 <div class="fs-2 mb-2">🎉</div>
-                <h5 class="fw-bold text-success mb-1">Nenhuma oferta repetida/similar detectada neste período!</h5>
+                <h5 class="fw-bold text-success mb-1">Nenhuma oferta repetida/similar encontrada com este filtro!</h5>
             </div>
         </div>
         """
     else:
-        for cl in comp_report["clusters"]:
+        for cl in page_clusters:
             c_title = html.escape(cl["canonical_title"])
             c_sig = html.escape(cl["signature"])
             c_img = cl["media_url"]
@@ -1226,811 +1408,155 @@ async def dashboard(
             </tr>
             """
 
-    # ───────────── HTML: CHECKBOXES ML EXCLUSÃO ─────────────
-    cat_checkboxes_html = ""
-    known_norm_set = set()
-    for idx, cat_name in enumerate(ml_auto.KNOWN_ML_CATEGORIES):
-        c_norm = ml_auto._normalize_text(cat_name)
-        known_norm_set.add(c_norm)
-        is_checked = "checked" if c_norm in excl_bestsellers_norm else ""
-        cat_checkboxes_html += f"""
-        <div class="col-md-3 col-sm-6">
-            <div class="form-check">
-                <input class="form-check-input" type="checkbox" name="excl_cat_checks" value="{cat_name}" id="catCheck{idx}" {is_checked}>
-                <label class="form-check-label small" for="catCheck{idx}">{cat_name}</label>
-            </div>
-        </div>
-        """
-    custom_bestsellers_str = ", ".join(
-        c
-        for c in excl_bestsellers_list
-        if ml_auto._normalize_text(c) not in known_norm_set
-    )
-
     import_options_html = "".join(
         f'<option value="{imp[2]}">[{imp[3]} - {imp[1]}] {imp[2]} (ID: {imp[0]})</option>'
         for imp in available_to_import
     )
 
-    # ───────────── HTML PRINCIPAL ─────────────
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>PromoCuiabá — Plataforma de Automação de Ofertas</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body {{ background-color: #f4f6f9; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }}
-            .app-wrapper {{ display: flex; min-height: 100vh; }}
-            .sidebar {{ width: 265px; background: #111827; color: #f9fafb; flex-shrink: 0; display: flex; flex-direction: column; box-shadow: 2px 0 10px rgba(0,0,0,0.12); }}
-            .sidebar-brand {{ padding: 1.25rem 1.25rem; border-bottom: 1px solid rgba(255,255,255,0.08); }}
-            .sidebar-nav {{ padding: 1rem 0.75rem; flex-grow: 1; }}
-            .sidebar-link {{ display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1rem; color: #9ca3af; text-decoration: none; border-radius: 0.5rem; margin-bottom: 0.35rem; font-weight: 500; transition: all 0.15s ease; }}
-            .sidebar-link:hover {{ background: rgba(255,255,255,0.06); color: #ffffff; }}
-            .sidebar-link.active {{ background: #2563eb; color: #ffffff; font-weight: 600; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35); }}
-            .sidebar-section-title {{ font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; padding: 0.75rem 1rem 0.35rem; font-weight: 700; }}
-            .main-area {{ flex-grow: 1; display: flex; flex-direction: column; min-width: 0; }}
-            .topbar {{ background: #ffffff; border-bottom: 1px solid #e5e7eb; padding: 0.75rem 1.75rem; }}
-            .stat-card {{ border: none; border-radius: 0.75rem; transition: transform 0.15s ease; }}
-        </style>
-    </head>
-    <body>
-        <div class="app-wrapper">
-            <aside class="sidebar">
-                <div class="sidebar-brand">
-                    <div class="d-flex align-items-center gap-2">
-                        <span class="fs-4">🚀</span>
-                        <div>
-                            <div class="fw-bold fs-5 lh-1 text-white">PromoCuiabá</div>
-                            <small class="text-secondary" style="font-size: 0.75rem;">SaaS Affiliate Hub</small>
-                        </div>
-                    </div>
-                </div>
-                <div class="sidebar-nav">
-                    <div class="sidebar-section-title">Operação Diária</div>
-                    <a class="sidebar-link {tabs_map['fila'][1]}" href="/?tab=fila&selected_date={current_date}">
-                        <span>📋 Fila de Disparos</span>
-                        <span class="badge rounded-pill bg-light text-dark">{pending_offers}</span>
-                    </a>
-                    <a class="sidebar-link {tabs_map['cadastrar'][1]}" href="/?tab=cadastrar&selected_date={current_date}">
-                        <span>➕ Cadastrar / Importar</span>
-                    </a>
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard.html",
+        context={
+            "tab": tab,
+            "lab_sub": lab_sub,
+            "cfg_sub": cfg_sub,
+            "current_date": current_date,
+            "today_str": today_str,
+            "configs": configs,
+            "alert_html": alert_html,
+            "total_offers": total_offers,
+            "sent_offers": sent_offers,
+            "pending_offers": pending_offers,
+            "remaining_seconds": remaining_seconds,
+            "timer_status_text": timer_status_text,
+            "queue_rows_html": queue_rows_html,
+            "import_options_html": import_options_html,
+            # IA
+            "ai_enabled": ai_enabled,
+            "ai_style": ai_style,
+            "ai_custom_prompt": ai_custom_prompt,
+            "ai_models_updated_at": ai_models_updated_at,
+            "ai_model_options_html": ai_model_options_html,
+            # Mix / Geral
+            "ml_auto_enabled": ml_auto_enabled,
+            "amazon_enabled": amazon_enabled,
+            "amazon_available": AMAZON_AVAILABLE,
+            "mix_shopee_pct": mix_shopee_pct,
+            "mix_amazon_pct": mix_amazon_pct,
+            "mix_ml_pct": mix_ml_pct,
+            "mix_label": mix_label,
+            # Shopee
+            "shopee_gen_pct": shopee_gen_pct,
+            "shopee_cat_pct": shopee_cat_pct,
+            "available_shopee_cats_count": len(available_shopee_cats),
+            "shopee_cats_updated_at": shopee_cats_updated_at,
+            "shopee_blocked_terms_raw": shopee_blocked_terms_raw,
+            "shopee_cat_checkboxes_html": shopee_cat_checkboxes_html,
+            "shopee_cat_lab_html": shopee_cat_lab_html,
+            "shopee_custom_cats_str": shopee_custom_cats_str,
+            "shopee_lab_results_html": shopee_lab_results_html,
+            # Mercado Livre
+            "ml_best_pct": ml_best_pct,
+            "ml_offers_pct": ml_offers_pct,
+            "ml_hist_days": ml_hist_days,
+            "ml_bestsellers_url": ml_bestsellers_url,
+            "ml_offers_url": ml_offers_url,
+            "ml_min_price": ml_min_price,
+            "ml_max_price": ml_max_price,
+            "ml_min_discount": ml_min_discount,
+            "ml_pages_per_run": ml_pages_per_run,
+            "ml_max_page_pool": ml_max_page_pool,
+            "available_ml_cats_count": len(available_ml_cats),
+            "ml_cats_updated_at": ml_cats_updated_at,
+            "excl_offers_raw": excl_offers_raw,
+            "ml_cat_tree_html": ml_cat_tree_html,
+            "ml_cat_lab_html": ml_cat_lab_html,
+            "custom_ml_cats_str": custom_ml_cats_str,
+            "ml_lab_results_html": ml_lab_results_html,
+            # Amazon
+            "amazon_deals_pct": amazon_deals_pct,
+            "amazon_bestsellers_pct": amazon_bestsellers_pct,
+            "amazon_hist_days": amazon_hist_days,
+            "amazon_bestsellers_url": amazon_bestsellers_url,
+            "amazon_deals_url": amazon_deals_url,
+            "amazon_cat_config_html": amazon_cat_config_html,
+            "amazon_cat_lab_html": amazon_cat_lab_html,
+            "amazon_cat_extra_str": amazon_cat_extra_str,
+            "amazon_lab_results_html": amazon_lab_results_html,
+            # Comparador / Anti-Repetição
+            "scan_days": scan_days,
+            "comp_store": comp_store,
+            "comp_search": comp_search or "",
+            "comp_page": comp_page,
+            "comp_total_pages": comp_total_pages,
+            "comp_filtered_total": comp_filtered_total,
+            "comp_report": comp_report,
+            "clusters_html": clusters_html,
+            "dedup_days_cfg": dedup_days_cfg,
+            "dedup_thresh_cfg": dedup_thresh_cfg,
+            "blocked_terms_cfg": blocked_terms_cfg,
+            # Vendas
+            "sales_days": sales_days,
+            "sales_platform": sales_platform,
+            "sales_status": sales_status,
+            "sales_data": sales_data,
+            "sales_gmv_brl": format_brl(sales_data["total_gmv"]),
+            "sales_comm_brl": format_brl(sales_data["total_commission"]),
+            "sales_completed_comm_brl": format_brl(sales_data["completed_commission"]),
+            "sales_rows_html": sales_rows_html,
+        },
+    )
 
-                    <div class="sidebar-section-title mt-2">Curadoria & Automação</div>
-                    <a class="sidebar-link {tabs_map['laboratorio'][1]}" href="/?tab=laboratorio&lab_sub={lab_sub}&selected_date={current_date}">
-                        <span>🧪 Laboratório</span>
-                        <span class="badge bg-warning text-dark">Ativo</span>
-                    </a>
-                    <a class="sidebar-link {tabs_map['comparador'][1]}" href="/?tab=comparador&selected_date={current_date}&comp_days={scan_days}&comp_store={comp_store}">
-                        <span>🛡️ Anti-Repetição</span>
-                        <span class="badge rounded-pill bg-danger">{comp_report['total_clusters']}</span>
-                    </a>
 
-                    <div class="sidebar-section-title mt-2">Gestão & Sistema</div>
-                    <a class="sidebar-link {tabs_map['vendas'][1]}" href="/?tab=vendas&selected_date={current_date}&sales_days={sales_days}&sales_platform={sales_platform}&sales_status={sales_status}">
-                        <span>💰 Vendas & Comissões</span>
-                    </a>
-                    <a class="sidebar-link {tabs_map['config'][1]}" href="/?tab=config&selected_date={current_date}">
-                        <span>⚙️ Configurações</span>
-                    </a>
-                </div>
-                <div class="p-3 border-top border-secondary border-opacity-25 small">
-                    <div class="d-flex justify-content-between align-items-center mb-1">
-                        <span class="text-secondary">Copywriting IA:</span>
-                        <span class="badge {'bg-info text-dark' if ai_enabled else 'bg-secondary'}">{'ATIVO ✨' if ai_enabled else 'OFF'}</span>
-                    </div>
-                    <div class="d-flex justify-content-between align-items-center">
-                        <span class="text-secondary">Mix Automático:</span>
-                        <span class="badge {'bg-warning text-dark' if (ml_auto_enabled or amazon_enabled) else 'bg-secondary'}">{mix_label if (ml_auto_enabled or amazon_enabled) else '100% Shopee'}</span>
-                    </div>
-                </div>
-            </aside>
+# ─────────── Rotas: Sincronizar Categorias Dinâmicas ───────────
+@app.post("/shopee/sync-categories")
+async def sync_shopee_categories_route(
+    selected_date: str = Form(""),
+    return_tab: str = Form("config"),
+):
+    res = await asyncio.to_thread(ShopeeAffiliateAPI.fetch_dynamic_shopee_categories)
+    if isinstance(res, tuple):
+        cats_dict, ok = res
+        count_synced = len(cats_dict) if ok else 0
+    elif isinstance(res, dict):
+        count_synced = len(res)
+    else:
+        count_synced = 0
 
-            <div class="main-area">
-                <header class="topbar d-flex flex-wrap justify-content-between align-items-center gap-3 shadow-sm">
-                    <div class="d-flex align-items-center gap-2">
-                        <span class="fw-bold text-secondary small text-uppercase">📅 Data da Fila:</span>
-                        <form method="GET" action="/" class="d-flex align-items-center gap-2 m-0">
-                            <input type="hidden" name="tab" value="{tab}">
-                            <input type="hidden" name="lab_sub" value="{lab_sub}">
-                            <input type="date" name="selected_date" value="{current_date}" class="form-control form-control-sm fw-semibold" onchange="this.form.submit()">
-                            <a href="/?tab={tab}&lab_sub={lab_sub}&selected_date={today_str}" class="btn btn-sm btn-outline-dark">Hoje</a>
-                        </form>
-                    </div>
-                    <div class="d-flex align-items-center gap-2 flex-wrap">
-                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">📋 Total: {total_offers}</span>
-                        <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">✅ Enviadas: {sent_offers}</span>
-                        <span class="badge bg-warning-subtle text-dark border border-warning px-3 py-2">⏳ Pendentes: {pending_offers}</span>
-                        <div class="bg-dark text-white rounded-3 px-3 py-1 d-flex align-items-center gap-2">
-                            <span>⏱️ <strong id="countdown-timer" class="text-info">--:--</strong></span>
-                            <small class="text-light opacity-75">({timer_status_text})</small>
-                        </div>
-                    </div>
-                </header>
+    if count_synced > 0:
+        cuiaba_tz = timezone(timedelta(hours=-4))
+        update_config(
+            "shopee_categories_updated_at",
+            datetime.now(cuiaba_tz).strftime("%d/%m/%Y %H:%M"),
+        )
 
-                <main class="container-fluid p-4">
-                    {alert_html}
+    if return_tab == "laboratorio":
+        return RedirectResponse(
+            url=f"/?tab=laboratorio&lab_sub=shopee&selected_date={selected_date}&synced_cats={count_synced}&synced_store=Shopee",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url=f"/?tab=config&cfg_sub=shopee&selected_date={selected_date}&synced_cats={count_synced}&synced_store=Shopee",
+        status_code=303,
+    )
 
-                    <!-- Form oculto para o botão 🚫 Termo direto da Fila ou Laboratório -->
-                    <form id="quickBlockForm" action="/queue/block-term" method="POST" style="display:none;">
-                        <input type="hidden" name="term" id="quickBlockTermInput">
-                        <input type="hidden" name="offer_id" id="quickBlockOfferIdInput">
-                        <input type="hidden" name="current_date" value="{current_date}">
-                    </form>
 
-                    <div class="tab-content">
-
-                        <!-- ================= FILA ================= -->
-                        <div class="tab-pane fade {tabs_map['fila'][0]}" role="tabpanel">
-                            <div class="d-flex flex-wrap gap-2 mb-3 align-items-center justify-content-between bg-white p-3 rounded-3 shadow-sm">
-                                <div>
-                                    <h5 class="fw-bold mb-0">📋 Fila de Disparos ({current_date})</h5>
-                                    <small class="text-muted">Use o botão <b>"🚫 Termo"</b> em qualquer oferta inútil (ex: almofada) para banir a palavra e limpar a fila.</small>
-                                </div>
-                                <div class="d-flex flex-wrap gap-2">
-                                    <a href="/?tab=cadastrar&selected_date={current_date}" class="btn btn-outline-dark fw-semibold">➕ Nova Manual</a>
-                                    <form action="/ai/regenerate-all-pending" method="POST" class="m-0">
-                                        <input type="hidden" name="target_date" value="{current_date}">
-                                        <button type="submit" class="btn btn-info fw-bold text-dark" {"disabled" if pending_offers == 0 else ""} title="Gera e aplica o gancho da IA nas ofertas pendentes desta data">
-                                            ✨ Gerar IA nas Pendentes ({pending_offers})
-                                        </button>
-                                    </form>
-                                    <form action="/generate-auto-offers" method="POST" class="m-0">
-                                        <input type="hidden" name="target_date" value="{current_date}">
-                                        <button type="submit" class="btn btn-success fw-bold">
-                                            🎲 Gerar {configs.get('auto_refill_count', '15')} Automáticas ({mix_label if (ml_auto_enabled or amazon_enabled) else '100% Shopee'})
-                                        </button>
-                                    </form>
-                                </div>
-                            </div>
-                            <div class="card border-0 shadow-sm rounded-3 overflow-hidden">
-                                <div class="table-responsive">
-                                    <table class="table table-hover align-middle mb-0">
-                                        <thead class="table-light">
-                                            <tr>
-                                                <th>ID</th><th>Produto</th><th>Plataforma</th><th>Categoria / Origem</th><th>Modo</th><th>Status</th><th>Ações Rápidas</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>{queue_rows_html}</tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- ================= CADASTRAR ================= -->
-                        <div class="tab-pane fade {tabs_map['cadastrar'][0]}" role="tabpanel">
-                            <div class="row g-4">
-                                <div class="col-lg-7">
-                                    <div class="card border-0 shadow-sm rounded-3">
-                                        <div class="card-header bg-dark text-white fw-bold py-3">➕ Cadastrar Nova Oferta Manual (Shopee, Amazon ou ML)</div>
-                                        <div class="card-body p-4">
-                                            <form action="/add-offer" method="POST" class="row g-3">
-                                                <input type="hidden" name="target_date" value="{current_date}">
-                                                <div class="col-md-12">
-                                                    <label class="form-label fw-bold small">1. Link do Produto ou Página de Cupom</label>
-                                                    <input type="url" name="product_url" id="productUrlInput" placeholder="https://s.shopee.com.br/... | https://amzn.to/... | https://mercadolivre.com/..." class="form-control" required>
-                                                </div>
-                                                <div class="col-md-12">
-                                                    <label class="form-label fw-bold small">2. Vídeo do Produto (.mp4) — Opcional</label>
-                                                    <input type="url" name="manual_video_url" id="manualVideoInput" placeholder="Cole o link direto https://down-ws-br.vod.susercontent.com/...mp4" class="form-control">
-                                                    <div class="form-check mt-2">
-                                                        <input class="form-check-input" type="checkbox" name="extract_video" value="1" id="extractVideoCheck">
-                                                        <label class="form-check-label small fw-semibold" for="extractVideoCheck">🎬 Tentar extrair vídeo (.mp4) automaticamente via Browser (Shopee)</label>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-12" id="videoValidationBox" style="display: none;">
-                                                    <div class="p-3 border rounded bg-light">
-                                                        <div id="videoValidationStatus" class="mb-2 fw-bold"></div>
-                                                        <video id="videoPreviewPlayer" class="rounded" style="max-height: 240px; display: none;" controls></video>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-12 d-flex gap-2 pt-2">
-                                                    <button type="button" class="btn btn-outline-secondary fw-semibold" onclick="validateShopeeVideo()">🔍 Testar Vídeo</button>
-                                                    <button type="submit" class="btn btn-primary flex-grow-1 fw-bold">🚀 Converter Link e Salvar na Fila ({current_date})</button>
-                                                </div>
-                                            </form>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-lg-5">
-                                    <div class="card border-0 shadow-sm rounded-3">
-                                        <div class="card-header bg-secondary text-white fw-bold py-3">📥 Reaproveitar / Importar Oferta</div>
-                                        <div class="card-body p-4">
-                                            <p class="small text-muted">Selecione um produto de dias anteriores para revalidar preço e adicionar em <b>{current_date}</b>:</p>
-                                            <form action="/import-offer" method="POST" class="row g-3">
-                                                <input type="hidden" name="target_date" value="{current_date}">
-                                                <div class="col-md-12">
-                                                    <select name="product_url" class="form-select" required>
-                                                        <option value="">Selecione...</option>
-                                                        {import_options_html}
-                                                    </select>
-                                                </div>
-                                                <div class="col-md-12">
-                                                    <button type="submit" class="btn btn-warning w-100 fw-bold">📥 Importar para {current_date}</button>
-                                                </div>
-                                            </form>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- ================= LABORATÓRIO (Shopee | Amazon | ML) ================= -->
-                        <div class="tab-pane fade {tabs_map['laboratorio'][0]}" role="tabpanel">
-                            <div class="card mb-3 border-0 shadow-sm rounded-3">
-                                <div class="card-header bg-white border-bottom pt-3 pb-0">
-                                    <ul class="nav nav-pills mb-3 gap-2" role="tablist">
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {lab_sub_map['shopee'][1]}" href="/?tab=laboratorio&lab_sub=shopee&selected_date={current_date}">🟠 Shopee</a>
-                                        </li>
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {lab_sub_map['amazon'][1]}" href="/?tab=laboratorio&lab_sub=amazon&selected_date={current_date}">🟠 Amazon</a>
-                                        </li>
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {lab_sub_map['ml'][1]}" href="/?tab=laboratorio&lab_sub=ml&selected_date={current_date}">🟡 Mercado Livre</a>
-                                        </li>
-                                    </ul>
-                                </div>
-                                <div class="card-body tab-content">
-
-                                    <!-- SHOPEE LAB (ATIVO!) -->
-                                    <div class="tab-pane fade {lab_sub_map['shopee'][0]}">
-                                        <div class="card mb-3 border-0 shadow-sm rounded-3">
-                                            <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
-                                                <div>
-                                                    <h5 class="fw-bold mb-1">🧪 Laboratório de Curadoria — Shopee</h5>
-                                                    <div class="small text-muted">
-                                                        Mix Shopee: <b>{shopee_cat_pct}% Categorias Selecionadas</b> + <b>{shopee_gen_pct}% Busca Geral</b> | Termos excluídos: <code>{html.escape(shopee_blocked_terms_raw or 'Nenhum')}</code>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <form action="/shopee-lab/simulate" method="POST" class="row g-2 mb-3 p-3 bg-white rounded-3 shadow-sm">
-                                            <input type="hidden" name="selected_date" value="{current_date}">
-                                            <div class="col-md-2">
-                                                <label class="small fw-bold">Qtd.</label>
-                                                <input type="number" name="sim_count" value="10" min="2" max="30" class="form-control form-control-sm">
-                                            </div>
-                                            <div class="col-md-8">
-                                                <label class="small fw-bold">Categorias Desejadas (marque para filtrar e salvar)</label>
-                                                <div class="row g-1 p-2 bg-light border rounded" style="max-height: 130px; overflow-y: auto;">
-                                                    {shopee_cat_lab_html}
-                                                </div>
-                                            </div>
-                                            <div class="col-md-2 d-flex align-items-end">
-                                                <button type="submit" class="btn fw-bold w-100 text-white" style="background-color:#ee4d2d;">🔍 Simular Shopee</button>
-                                            </div>
-                                        </form>
-                                        {shopee_lab_results_html}
-                                    </div>
-
-                                    <!-- AMAZON LAB -->
-                                    <div class="tab-pane fade {lab_sub_map['amazon'][0]}">
-                                        <div class="card mb-3 border-0 shadow-sm rounded-3">
-                                            <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
-                                                <div>
-                                                    <h5 class="fw-bold mb-1">🧪 Laboratório de Curadoria — Amazon</h5>
-                                                    <div class="small text-muted">
-                                                        Fontes: <b>{amazon_deals_pct}% Deals</b> + <b>{amazon_bestsellers_pct}% Bestsellers</b> | Anti-repetição: <b>{amazon_hist_days} dias</b>.
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <form action="/amazon-lab/simulate" method="POST" class="row g-2 mb-3 p-3 bg-white rounded-3 shadow-sm">
-                                            <input type="hidden" name="selected_date" value="{current_date}">
-                                            <div class="col-md-2">
-                                                <label class="small fw-bold">Qtd.</label>
-                                                <input type="number" name="sim_count" value="10" min="2" max="30" class="form-control form-control-sm">
-                                            </div>
-                                            <div class="col-md-8">
-                                                <label class="small fw-bold">Categorias</label>
-                                                <div class="row g-1 p-2 bg-light border rounded" style="max-height: 130px; overflow-y: auto;">
-                                                    {amazon_cat_lab_html if amazon_cat_lab_html else '<span class="text-muted small">Nenhuma categoria configurada. Configure em ⚙️ Configurações → Mix & Lojas.</span>'}
-                                                </div>
-                                            </div>
-                                            <div class="col-md-2 d-flex align-items-end">
-                                                <button type="submit" class="btn btn-warning fw-bold w-100" {"disabled" if not AMAZON_AVAILABLE else ""}>🔍 Simular Amazon</button>
-                                            </div>
-                                        </form>
-                                        {amazon_lab_results_html}
-                                    </div>
-
-                                    <!-- ML LAB -->
-                                    <div class="tab-pane fade {lab_sub_map['ml'][0]}">
-                                        <div class="card mb-3 border-0 shadow-sm rounded-3">
-                                            <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
-                                                <div>
-                                                    <h5 class="fw-bold mb-1">🧪 Laboratório de Curadoria — Mercado Livre</h5>
-                                                    <div class="small text-muted">
-                                                        Mix ML: <b>{ml_best_pct}% Mais Vendidos</b> + <b>{ml_offers_pct}% Ofertas</b> (Faixa: R$ {ml_min_price} a R$ {ml_max_price} | Desc. mín: {ml_min_discount}% | Págs: {ml_pages_per_run} de {ml_max_page_pool}) | Anti-repetição: <b>{ml_hist_days} dias</b>.
-                                                    </div>
-                                                </div>
-                                                <form action="/ml-lab/simulate" method="POST" class="d-flex gap-2 align-items-center m-0">
-                                                    <input type="hidden" name="selected_date" value="{current_date}">
-                                                    <input type="number" name="sim_count" value="10" min="2" max="30" class="form-control form-control-sm" style="width: 80px;">
-                                                    <button type="submit" class="btn btn-warning fw-bold text-nowrap">🔍 Simular ML</button>
-                                                </form>
-                                            </div>
-                                        </div>
-                                        {ml_lab_results_html}
-                                    </div>
-
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- ================= COMPARADOR ================= -->
-                        <div class="tab-pane fade {tabs_map['comparador'][0]}" role="tabpanel">
-                            <div class="d-flex flex-wrap justify-content-between align-items-center bg-white p-3 rounded-3 shadow-sm mb-3 gap-2">
-                                <form method="GET" action="/" class="d-flex flex-wrap gap-2 align-items-center m-0">
-                                    <input type="hidden" name="tab" value="comparador">
-                                    <input type="hidden" name="selected_date" value="{current_date}">
-                                    <span class="fw-bold">Auditar Período:</span>
-                                    <select name="comp_days" class="form-select form-select-sm" style="width:auto;" onchange="this.form.submit()">
-                                        <option value="7" {"selected" if scan_days == 7 else ""}>Últimos 7 dias</option>
-                                        <option value="14" {"selected" if scan_days == 14 else ""}>Últimos 14 dias</option>
-                                        <option value="30" {"selected" if scan_days == 30 else ""}>Últimos 30 dias</option>
-                                    </select>
-                                    <select name="comp_store" class="form-select form-select-sm" style="width:auto;" onchange="this.form.submit()">
-                                        <option value="all" {"selected" if comp_store == "all" else ""}>🌐 Todas as Lojas</option>
-                                        <option value="shopee" {"selected" if comp_store == "shopee" else ""}>🟠 Shopee</option>
-                                        <option value="amazon" {"selected" if comp_store == "amazon" else ""}>🟠 Amazon</option>
-                                        <option value="mercado" {"selected" if comp_store == "mercado" else ""}>🟡 Mercado Livre</option>
-                                    </select>
-                                    <span class="badge bg-secondary ms-2">Analisados: {comp_report['total_scanned']}</span>
-                                    <span class="badge bg-danger">Conflitos: {comp_report['total_clusters']}</span>
-                                </form>
-                                <form action="/comparator/clean-duplicates" method="POST" class="m-0">
-                                    <input type="hidden" name="comp_days" value="{scan_days}">
-                                    <input type="hidden" name="comp_store" value="{comp_store}">
-                                    <button type="submit" class="btn btn-sm btn-danger fw-bold" {"disabled" if comp_report['total_suggested_deletes'] == 0 else ""}>
-                                        🧹 Excluir {comp_report['total_suggested_deletes']} Duplicadas Pendentes
-                                    </button>
-                                </form>
-                            </div>
-                            {clusters_html}
-                        </div>
-
-                        <!-- ================= VENDAS ================= -->
-                        <div class="tab-pane fade {tabs_map['vendas'][0]}" role="tabpanel">
-                            <div class="card mb-3 border-0 shadow-sm rounded-3">
-                                <div class="card-body py-3">
-                                    <form method="GET" action="/" class="row g-2 align-items-center">
-                                        <input type="hidden" name="tab" value="vendas">
-                                        <div class="col-md-3">
-                                            <select name="sales_days" class="form-select form-select-sm" onchange="this.form.submit()">
-                                                <option value="7" {"selected" if sales_days == 7 else ""}>Últimos 7 dias</option>
-                                                <option value="15" {"selected" if sales_days == 15 else ""}>Últimos 15 dias</option>
-                                                <option value="30" {"selected" if sales_days == 30 else ""}>Últimos 30 dias</option>
-                                                <option value="60" {"selected" if sales_days == 60 else ""}>Últimos 60 dias</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <select name="sales_platform" class="form-select form-select-sm" onchange="this.form.submit()">
-                                                <option value="all" {"selected" if sales_platform == "all" else ""}>🌐 Todas as Plataformas</option>
-                                                <option value="shopee" {"selected" if sales_platform == "shopee" else ""}>🟠 Shopee</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <select name="sales_status" class="form-select form-select-sm" onchange="this.form.submit()">
-                                                <option value="all" {"selected" if sales_status == "all" else ""}>Todos os Status</option>
-                                                <option value="pending" {"selected" if sales_status == "pending" else ""}>⏳ Pendentes</option>
-                                                <option value="completed" {"selected" if sales_status == "completed" else ""}>✅ Concluídos</option>
-                                                <option value="cancelled" {"selected" if sales_status == "cancelled" else ""}>❌ Cancelados</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <button type="submit" class="btn btn-sm btn-success w-100 fw-bold">🔄 Atualizar</button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </div>
-                            <div class="row g-3 mb-3">
-                                <div class="col-md-3">
-                                    <div class="card stat-card shadow-sm text-center h-100">
-                                        <div class="card-body py-3">
-                                            <small class="text-muted fw-semibold">🛍️ Total de Pedidos ({sales_days}d)</small>
-                                            <h3 class="fw-bold text-primary mb-1">{sales_data['total_orders']}</h3>
-                                            <small class="text-muted">✅ {sales_data['completed_orders']} | ⏳ {sales_data['pending_orders']} | ❌ {sales_data['cancelled_orders']}</small>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <div class="card stat-card shadow-sm text-center h-100">
-                                        <div class="card-body py-3">
-                                            <small class="text-muted fw-semibold">🛒 GMV</small>
-                                            <h3 class="fw-bold text-dark mb-0">{format_brl(sales_data['total_gmv'])}</h3>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <div class="card stat-card shadow-sm text-center h-100">
-                                        <div class="card-body py-3">
-                                            <small class="text-muted fw-semibold">💵 Comissão Estimada</small>
-                                            <h3 class="fw-bold text-warning mb-0">{format_brl(sales_data['total_commission'])}</h3>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <div class="card stat-card shadow-sm text-center h-100">
-                                        <div class="card-body py-3">
-                                            <small class="text-muted fw-semibold">✅ Comissão Aprovada</small>
-                                            <h3 class="fw-bold text-success mb-0">{format_brl(sales_data['completed_commission'])}</h3>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card border-0 shadow-sm rounded-3 overflow-hidden">
-                                <div class="table-responsive">
-                                    <table class="table table-striped table-sm align-middle mb-0">
-                                        <thead class="table-light">
-                                            <tr><th>Data/Hora</th><th>Loja</th><th>Pedido</th><th>Itens</th><th class="text-center">Qtd</th><th>Valor</th><th>Comissão</th><th>Status</th></tr>
-                                        </thead>
-                                        <tbody>{sales_rows_html}</tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- ================= CONFIGURAÇÕES ================= -->
-                        <div class="tab-pane fade {tabs_map['config'][0]}" role="tabpanel">
-                            <div class="card border-0 shadow-sm rounded-3">
-                                <div class="card-header bg-white border-bottom pt-3 pb-0">
-                                    <ul class="nav nav-pills mb-3 gap-2" role="tablist">
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {cfg_sub_map['geral'][1]}" href="/?tab=config&cfg_sub=geral&selected_date={current_date}">⏰ 1. Horários & Disparos</a>
-                                        </li>
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {cfg_sub_map['mix'][1]}" href="/?tab=config&cfg_sub=mix&selected_date={current_date}">🎛️ 2. Mix & Lojas</a>
-                                        </li>
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {cfg_sub_map['ia'][1]}" href="/?tab=config&cfg_sub=ia&selected_date={current_date}">🤖 3. Copy com IA</a>
-                                        </li>
-                                        <li class="nav-item">
-                                            <a class="nav-link fw-semibold {cfg_sub_map['dedup'][1]}" href="/?tab=config&cfg_sub=dedup&selected_date={current_date}">🛡️ 4. Anti-Repetição</a>
-                                        </li>
-                                    </ul>
-                                </div>
-                                <div class="card-body p-4 tab-content">
-
-                                    <!-- GERAL -->
-                                    <div class="tab-pane fade {cfg_sub_map['geral'][0]}">
-                                        <h6 class="fw-bold mb-3">⏰ Horários de Disparo & Janela Operacional</h6>
-                                        <form action="/update-config" method="POST" class="row g-3">
-                                            <div class="col-md-4">
-                                                <label class="form-label small fw-bold">Início</label>
-                                                <input type="time" name="start_time" value="{configs.get('start_time', '08:00')}" class="form-control" required>
-                                            </div>
-                                            <div class="col-md-4">
-                                                <label class="form-label small fw-bold">Término</label>
-                                                <input type="time" name="end_time" value="{configs.get('end_time', '22:00')}" class="form-control" required>
-                                            </div>
-                                            <div class="col-md-4">
-                                                <label class="form-label small fw-bold">Intervalo (min)</label>
-                                                <input type="number" name="interval_minutes" value="{configs.get('interval_minutes', '30')}" class="form-control" required>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <label class="form-label small fw-bold">Quantidade por Lote Automático</label>
-                                                <input type="number" name="auto_refill_count" value="{configs.get('auto_refill_count', '15')}" class="form-control" required>
-                                            </div>
-                                            <div class="col-md-6 d-flex align-items-end">
-                                                <div class="form-check form-switch">
-                                                    <input class="form-check-input" type="checkbox" name="auto_refill_enabled" value="1" id="autoRefillSwitch" {"checked" if configs.get('auto_refill_enabled', '1') == '1' else ""}>
-                                                    <label class="form-check-label fw-bold" for="autoRefillSwitch">🔄 Auto-Abastecer Fila quando zerar</label>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-12 pt-2">
-                                                <button type="submit" class="btn btn-primary fw-bold px-4">💾 Salvar</button>
-                                            </div>
-                                        </form>
-                                    </div>
-
-                                    <!-- MIX & LOJAS -->
-                                    <div class="tab-pane fade {cfg_sub_map['mix'][0]}">
-                                        <form action="/update-mix" method="POST" class="row g-3">
-
-                                            <!-- CABEÇALHO: MIX -->
-                                            <div class="col-md-12">
-                                                <h6 class="fw-bold mb-2">🎛️ Mix de Lojas na Geração Automática</h6>
-                                                <div class="row g-2 p-3 bg-warning-subtle border border-warning rounded">
-                                                    <div class="col-md-3">
-                                                        <label class="small fw-bold">% Shopee</label>
-                                                        <input type="number" min="0" max="100" name="mix_shopee_pct" value="{mix_shopee_pct}" class="form-control" required>
-                                                    </div>
-                                                    <div class="col-md-3">
-                                                        <label class="small fw-bold">% Amazon</label>
-                                                        <input type="number" min="0" max="100" name="mix_amazon_pct" value="{mix_amazon_pct}" class="form-control" required>
-                                                    </div>
-                                                    <div class="col-md-3">
-                                                        <label class="small fw-bold">% ML (calc)</label>
-                                                        <input type="number" value="{mix_ml_pct}" class="form-control" disabled>
-                                                    </div>
-                                                    <div class="col-md-3 d-flex align-items-end">
-                                                        <button type="button" class="btn btn-outline-dark w-100" onclick="restaurarMixPadrao()">🔄 Restaurar 40/40/20</button>
-                                                    </div>
-                                                    <div class="col-md-6">
-                                                        <div class="form-check form-switch">
-                                                            <input class="form-check-input" type="checkbox" name="ml_auto_enabled" value="1" id="mlAutoSwitch" {"checked" if ml_auto_enabled else ""}>
-                                                            <label class="form-check-label fw-bold" for="mlAutoSwitch">🟡 Incluir Mercado Livre no mix</label>
-                                                        </div>
-                                                    </div>
-                                                    <div class="col-md-6">
-                                                        <div class="form-check form-switch">
-                                                            <input class="form-check-input" type="checkbox" name="amazon_auto_enabled" value="1" id="amazonAutoSwitch" {"checked" if amazon_enabled else ""} {"disabled" if not AMAZON_AVAILABLE else ""}>
-                                                            <label class="form-check-label fw-bold" for="amazonAutoSwitch">🟠 Incluir Amazon no mix {"(módulo amazon_auto.py não instalado)" if not AMAZON_AVAILABLE else ""}</label>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <!-- SHOPEE -->
-                                            <div class="col-md-12 mt-3">
-                                                <h6 class="fw-bold mb-2">🟠 Shopee (Categorias Desejadas & Exclusão de Termos)</h6>
-                                                <div class="row g-2 p-3 bg-light border rounded">
-                                                    <div class="col-md-4">
-                                                        <label class="small fw-bold">% Busca Geral (Top Ofertas)</label>
-                                                        <input type="number" min="0" max="100" name="shopee_general_pct" value="{shopee_gen_pct}" class="form-control">
-                                                        <small class="text-muted">{shopee_cat_pct}% virá das Categorias marcadas ao lado</small>
-                                                    </div>
-                                                    <div class="col-md-8">
-                                                        <label class="small fw-bold">Palavras-chave extras para Busca Geral (opcional)</label>
-                                                        <input type="text" name="auto_keywords" value="{html.escape(configs.get('auto_keywords', ''))}" placeholder="Ex: air fryer, kit ferramentas, tênis corrida" class="form-control">
-                                                    </div>
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold text-success">✅ Categorias Desejadas na Shopee ({shopee_cat_pct}% do lote):</label>
-                                                        <div class="row g-2 p-2 bg-white border rounded">
-                                                            {shopee_cat_checkboxes_html}
-                                                        </div>
-                                                        <input type="text" name="shopee_custom_categories" value="{html.escape(shopee_custom_cats_str)}" placeholder="Outras categorias/nichos desejados (separados por vírgula)" class="form-control form-control-sm mt-2">
-                                                    </div>
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold text-danger">🚫 Termos Excluídos na Shopee (ex: almofada, capa, pelúcia):</label>
-                                                        <input type="text" name="shopee_blocked_terms" value="{html.escape(shopee_blocked_terms_raw)}" placeholder="Ex: almofada, capa de almofada, chaveiro, adesivo" class="form-control">
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <!-- AMAZON -->
-                                            <div class="col-md-12 mt-3">
-                                                <h6 class="fw-bold mb-2">🟠 Amazon</h6>
-                                                <div class="row g-2 p-3 bg-light border rounded">
-                                                    <div class="col-md-4">
-                                                        <label class="small fw-bold">% Deals dentro da Amazon</label>
-                                                        <input type="number" min="0" max="100" name="amazon_bestsellers_pct" value="{amazon_deals_pct}" class="form-control">
-                                                        <small class="text-muted">{amazon_bestsellers_pct}% Bestsellers</small>
-                                                    </div>
-                                                    <div class="col-md-4">
-                                                        <label class="small fw-bold">Histórico (dias)</label>
-                                                        <input type="number" name="amazon_history_days" value="{amazon_hist_days}" class="form-control">
-                                                    </div>
-                                                    <div class="col-md-4"></div>
-                                                    <div class="col-md-6">
-                                                        <label class="small fw-bold">URL Bestsellers</label>
-                                                        <input type="url" name="amazon_bestsellers_url" value="{html.escape(amazon_bestsellers_url)}" class="form-control">
-                                                    </div>
-                                                    <div class="col-md-6">
-                                                        <label class="small fw-bold">URL Deals</label>
-                                                        <input type="url" name="amazon_deals_url" value="{html.escape(amazon_deals_url)}" class="form-control">
-                                                    </div>
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold text-success">✅ Categorias Amazon:</label>
-                                                        <div class="row g-2 p-2 bg-white border rounded">
-                                                            {amazon_cat_config_html if amazon_cat_config_html else '<span class="text-muted small">Módulo não instalado</span>'}
-                                                        </div>
-                                                        <input type="text" name="custom_categories" value="{html.escape(amazon_cat_extra_str)}" placeholder="Categorias extras (vírgula)" class="form-control form-control-sm mt-2">
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <!-- MERCADO LIVRE -->
-                                            <div class="col-md-12 mt-3">
-                                                <h6 class="fw-bold mb-2">🟡 Mercado Livre (100% Parametrizado)</h6>
-                                                <div class="row g-2 p-3 bg-light border rounded">
-                                                    <div class="col-md-3">
-                                                        <label class="small fw-bold">% Mais Vendidos</label>
-                                                        <input type="number" min="0" max="100" name="ml_best_sellers_pct" value="{ml_best_pct}" class="form-control">
-                                                        <small class="text-muted">{ml_offers_pct}% Ofertas</small>
-                                                    </div>
-                                                    <div class="col-md-3">
-                                                        <label class="small fw-bold">Histórico Anti-Repetição (dias)</label>
-                                                        <input type="number" min="1" max="60" name="ml_history_days" value="{ml_hist_days}" class="form-control">
-                                                    </div>
-                                                    <div class="col-md-2">
-                                                        <label class="small fw-bold">Preço Mín. (R$)</label>
-                                                        <input type="number" min="0" step="1" name="ml_min_price" value="{ml_min_price}" class="form-control" title="0 = sem mínimo">
-                                                    </div>
-                                                    <div class="col-md-2">
-                                                        <label class="small fw-bold">Preço Máx. (R$)</label>
-                                                        <input type="number" min="0" step="1" name="ml_max_price" value="{ml_max_price}" class="form-control" title="0 = sem limite máximo">
-                                                    </div>
-                                                    <div class="col-md-2">
-                                                        <label class="small fw-bold">Desc. Mín. (%)</label>
-                                                        <input type="number" min="0" max="90" name="ml_min_discount" value="{ml_min_discount}" class="form-control" title="Desconto mínimo real exigido nas Ofertas">
-                                                    </div>
-
-                                                    <div class="col-md-6 mt-2">
-                                                        <label class="small fw-bold">Páginas Sorteadas por Busca (por URL)</label>
-                                                        <input type="number" min="1" max="30" name="ml_pages_per_run" value="{ml_pages_per_run}" class="form-control">
-                                                        <small class="text-muted">Quantas páginas ler a cada simulação/lote (ex: 4 páginas).</small>
-                                                    </div>
-                                                    <div class="col-md-6 mt-2">
-                                                        <label class="small fw-bold">Alcance Máximo de Páginas (Pool)</label>
-                                                        <input type="number" min="1" max="50" name="ml_max_page_pool" value="{ml_max_page_pool}" class="form-control">
-                                                        <small class="text-muted">Sorteia páginas entre 1 e este número (ex: 15 ou 25) para variar os produtos.</small>
-                                                    </div>
-
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold">URL Mais Vendidos ML</label>
-                                                        <input type="url" name="ml_bestsellers_url" value="{html.escape(ml_bestsellers_url)}" class="form-control">
-                                                    </div>
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold">URL(s) de Ofertas ML (aceita vários links: 1 por linha ou separados por vírgula)</label>
-                                                        <textarea name="ml_offers_url" rows="3" class="form-control font-monospace small" placeholder="https://www.mercadolivre.com.br/ofertas?promotion_type=lightning&#10;https://www.mercadolivre.com.br/ofertas">{html.escape(ml_offers_url)}</textarea>
-                                                    </div>
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold text-danger">🚫 Categorias excluídas em Mais Vendidos</label>
-                                                        <div class="row g-2 p-2 bg-white border rounded">{cat_checkboxes_html}</div>
-                                                        <input type="text" name="custom_excl_bestsellers" value="{html.escape(custom_bestsellers_str)}" placeholder="Extras" class="form-control form-control-sm mt-2">
-                                                    </div>
-                                                    <div class="col-md-12 mt-2">
-                                                        <label class="small fw-bold">🚫 Termos excluídos em Ofertas</label>
-                                                        <input type="text" name="ml_excluded_categories_offers" value="{html.escape(excl_offers_raw)}" placeholder="Ex: gift card, digital" class="form-control">
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div class="col-md-12 pt-2">
-                                                <button type="submit" class="btn btn-warning fw-bold px-4">💾 Salvar Mix & Lojas</button>
-                                            </div>
-                                        </form>
-                                    </div>
-
-                                    <!-- IA -->
-                                    <div class="tab-pane fade {cfg_sub_map['ia'][0]}">
-                                        <h6 class="fw-bold mb-3">🤖 Copywriting com IA (Google Gemini)</h6>
-                                        <form action="/update-ai-config" method="POST" class="row g-3">
-                                            <div class="col-md-12">
-                                                <div class="form-check form-switch p-3 bg-info-subtle border border-info rounded">
-                                                    <input class="form-check-input ms-0 me-2" type="checkbox" name="ai_copy_enabled" value="1" id="aiCopySwitch" {"checked" if ai_enabled else ""}>
-                                                    <label class="form-check-label fw-bold" for="aiCopySwitch">✨ Ativar gancho automático com IA nas novas ofertas</label>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <label class="form-label small fw-bold">Estilo</label>
-                                                <select name="ai_copy_style" class="form-select">
-                                                    <option value="urgencia_comparativo" {"selected" if ai_style == "urgencia_comparativo" else ""}>🚨 Urgência + Comparativo</option>
-                                                    <option value="calculo_unitario" {"selected" if ai_style == "calculo_unitario" else ""}>🧮 Preço por Unidade (Kits)</option>
-                                                    <option value="achadinho_amigavel" {"selected" if ai_style == "achadinho_amigavel" else ""}>😍 Achadinho VIP</option>
-                                                </select>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <label class="form-label small fw-bold">Instrução customizada</label>
-                                                <input type="text" name="ai_copy_custom_prompt" value="{html.escape(ai_custom_prompt)}" class="form-control">
-                                            </div>
-                                            <div class="col-md-12 pt-2">
-                                                <button type="submit" class="btn btn-info fw-bold px-4">💾 Salvar</button>
-                                            </div>
-                                        </form>
-                                    </div>
-
-                                    <!-- DEDUP -->
-                                    <div class="tab-pane fade {cfg_sub_map['dedup'][0]}">
-                                        <h6 class="fw-bold mb-3">🛡️ Anti-Repetição & Blacklist Global</h6>
-                                        <form action="/comparator/update-settings" method="POST" class="row g-3">
-                                            <div class="col-md-6">
-                                                <label class="form-label small fw-bold">Janela Histórica (dias)</label>
-                                                <input type="number" min="1" max="60" name="dedup_history_days" value="{dedup_days_cfg}" class="form-control" required>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <label class="form-label small fw-bold">Similaridade mínima (%)</label>
-                                                <input type="number" min="35" max="95" name="dedup_similarity_threshold" value="{int(dedup_thresh_cfg)}" class="form-control" required>
-                                            </div>
-                                            <div class="col-md-12">
-                                                <label class="form-label small fw-bold">🚫 Termos bloqueados em Todas as Lojas (vírgula)</label>
-                                                <textarea name="dedup_blocked_terms" rows="3" class="form-control">{html.escape(blocked_terms_cfg)}</textarea>
-                                            </div>
-                                            <div class="col-md-12 pt-2">
-                                                <button type="submit" class="btn btn-dark fw-bold px-4">💾 Salvar</button>
-                                            </div>
-                                        </form>
-                                    </div>
-
-                                </div>
-                            </div>
-                        </div>
-
-                    </div>
-                </main>
-            </div>
-        </div>
-
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-        <script>
-            function blockTermFromQueueBtn(btn) {{
-                const offerId = btn.getAttribute('data-offer-id');
-                const suggested = btn.getAttribute('data-suggested') || '';
-                const fullTitle = btn.getAttribute('data-title') || '';
-                const term = prompt(
-                    '🚫 Bloquear termo indesejado e remover da fila pendente:\\n\\nProduto: ' + fullTitle + '\\n\\nDigite a palavra ou termo que deseja banir (ex: almofada):',
-                    suggested
-                );
-                if (term && term.trim().length >= 2) {{
-                    document.getElementById('quickBlockTermInput').value = term.trim();
-                    document.getElementById('quickBlockOfferIdInput').value = offerId;
-                    document.getElementById('quickBlockForm').submit();
-                }}
-            }}
-
-            async function validateShopeeVideo() {{
-                const urlInput = document.getElementById('productUrlInput');
-                const manualInput = document.getElementById('manualVideoInput');
-                const box = document.getElementById('videoValidationBox');
-                const statusEl = document.getElementById('videoValidationStatus');
-                const player = document.getElementById('videoPreviewPlayer');
-                const check = document.getElementById('extractVideoCheck');
-                const prodVal = urlInput.value.trim();
-                const manualVal = manualInput.value.trim();
-                if (!prodVal && !manualVal) {{
-                    alert('Cole o link do produto ou o link direto do vídeo (.mp4) primeiro!');
-                    return;
-                }}
-                if (prodVal.toLowerCase().includes('.mp4') && !manualVal) {{
-                    manualInput.value = prodVal;
-                    urlInput.value = '';
-                }}
-                box.style.display = 'block';
-                player.style.display = 'none';
-                statusEl.innerHTML = '⏳ Validando vídeo... aguarde.';
-                const formData = new FormData();
-                formData.append('product_url', urlInput.value.trim());
-                formData.append('manual_video_url', manualInput.value.trim());
-                try {{
-                    const resp = await fetch('/validate-video', {{ method: 'POST', body: formData }});
-                    const data = await resp.json();
-                    statusEl.innerHTML = data.message;
-                    if (data.success && data.video_url) {{
-                        player.src = data.video_url;
-                        player.style.display = 'block';
-                        manualInput.value = data.video_url;
-                        check.checked = true;
-                    }}
-                }} catch (err) {{
-                    statusEl.innerHTML = '❌ Erro na requisição: ' + err;
-                }}
-            }}
-
-            function restaurarMixPadrao() {{
-                const shopee = document.querySelector('input[name="mix_shopee_pct"]');
-                const amazon = document.querySelector('input[name="mix_amazon_pct"]');
-                const amazonCheck = document.querySelector('input[name="amazon_auto_enabled"]');
-                const mlCheck = document.querySelector('input[name="ml_auto_enabled"]');
-                if (shopee) shopee.value = 40;
-                if (amazon) amazon.value = 40;
-                if (amazonCheck) amazonCheck.checked = true;
-                if (mlCheck) mlCheck.checked = true;
-            }}
-
-            let secondsLeft = {remaining_seconds};
-            const timerEl = document.getElementById('countdown-timer');
-            function updateCountdown() {{
-                if (secondsLeft <= 0) {{ timerEl.textContent = "00:00"; return; }}
-                const mins = Math.floor(secondsLeft / 60);
-                const secs = secondsLeft % 60;
-                timerEl.textContent = String(mins).padStart(2, '0') + ":" + String(secs).padStart(2, '0');
-                secondsLeft--;
-                if (secondsLeft === 0) {{ setTimeout(() => window.location.reload(), 1000); }}
-            }}
-            if (secondsLeft > 0) {{
-                updateCountdown();
-                setInterval(updateCountdown, 1000);
-            }}
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+@app.post("/ml/sync-categories")
+async def sync_ml_categories_route(
+    selected_date: str = Form(""),
+    return_tab: str = Form("config"),
+):
+    cats_dict, ok = await asyncio.to_thread(ml_auto.fetch_dynamic_ml_categories)
+    count_synced = len(cats_dict) if ok else 0
+    if return_tab == "laboratorio":
+        return RedirectResponse(
+            url=f"/?tab=laboratorio&lab_sub=ml&selected_date={selected_date}&synced_cats={count_synced}&synced_store=Mercado%20Livre",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url=f"/?tab=config&cfg_sub=ml&selected_date={selected_date}&synced_cats={count_synced}&synced_store=Mercado%20Livre",
+        status_code=303,
+    )
 
 
 # ─────────── Rota: Bloquear Termo Direto da Tela de Fila / Laboratório ───────────
@@ -2039,6 +1565,8 @@ async def block_term_from_queue(
     term: str = Form(...),
     offer_id: int = Form(0),
     current_date: str = Form(...),
+    return_tab: str = Form("fila"),
+    return_lab_sub: str = Form("shopee"),
 ):
     clean_t = term.strip().lower()
     purged = 0
@@ -2070,23 +1598,28 @@ async def block_term_from_queue(
             delete_offer(del_id)
             purged += 1
 
-        # Remove também de eventual simulação aberta no cache do Laboratório Shopee
-        shp_lab = _PORTAL_CACHE.get("shopee_lab")
-        if shp_lab and shp_lab.get("items"):
-            shp_lab["items"] = [
-                it
-                for it in shp_lab["items"]
-                if clean_t not in (it.get("title") or "").lower()
-            ]
+        for lab_key in ("shopee_lab", "amazon_lab", "ml_lab"):
+            lab_cache = _PORTAL_CACHE.get(lab_key)
+            if lab_cache and lab_cache.get("items"):
+                lab_cache["items"] = [
+                    it
+                    for it in lab_cache["items"]
+                    if clean_t not in (it.get("title") or "").lower()
+                ]
 
     _PORTAL_CACHE["comp"]["ts"] = 0.0
+    if return_tab == "laboratorio":
+        return RedirectResponse(
+            url=f"/?tab=laboratorio&lab_sub={return_lab_sub}&selected_date={current_date}&blocked_term={clean_t}&purged_count={purged}",
+            status_code=303,
+        )
     return RedirectResponse(
         url=f"/?tab=fila&selected_date={current_date}&blocked_term={clean_t}&purged_count={purged}",
         status_code=303,
     )
 
 
-# ─────────── Rotas Shopee Lab (NOVAS!) ───────────
+# ─────────── Rotas Shopee Lab ───────────
 @app.post("/shopee-lab/simulate")
 async def shopee_lab_simulate(
     selected_date: str = Form(...),
@@ -2193,9 +1726,17 @@ async def ai_regenerate_all_pending(target_date: str = Form(...)):
 
 # ─────────── Rotas ML Lab ───────────
 @app.post("/ml-lab/simulate")
-async def ml_lab_simulate(selected_date: str = Form(...), sim_count: int = Form(10)):
+async def ml_lab_simulate(
+    selected_date: str = Form(...),
+    sim_count: int = Form(10),
+    cats: list[str] = Form([]),
+):
+    if cats:
+        update_config("ml_target_categories", "; ".join(cats))
     sim_data = await asyncio.to_thread(
-        ml_auto.simulate_ml_offers_selection, max(2, min(30, sim_count))
+        ml_auto.simulate_ml_offers_selection,
+        max(2, min(30, sim_count)),
+        cats if cats else None,
     )
     _PORTAL_CACHE["ml_lab"] = sim_data
     return RedirectResponse(
@@ -2340,7 +1881,7 @@ async def amazon_lab_approve_all(target_date: str = Form(...)):
     )
 
 
-# ─────────── Rotas Config ───────────
+# ─────────── Rotas Config (Separadas por Loja) ───────────
 @app.post("/update-config")
 async def update_parameters(
     start_time: str = Form(...),
@@ -2348,54 +1889,34 @@ async def update_parameters(
     interval_minutes: str = Form(...),
     auto_refill_count: str = Form("15"),
     auto_refill_enabled: str = Form(None),
+    amazon_auto_enabled: str = Form(None),
+    ml_auto_enabled: str = Form(None),
+    mix_shopee_pct: str = Form("60"),
+    mix_amazon_pct: str = Form("0"),
 ):
     update_config("start_time", start_time)
     update_config("end_time", end_time)
     update_config("interval_minutes", interval_minutes)
     update_config("auto_refill_count", auto_refill_count)
     update_config("auto_refill_enabled", "1" if auto_refill_enabled == "1" else "0")
+    update_config("amazon_auto_enabled", "1" if amazon_auto_enabled == "1" else "0")
+    update_config("ml_auto_enabled", "1" if ml_auto_enabled == "1" else "0")
+    update_config("mix_shopee_pct", str(max(0, min(100, int(mix_shopee_pct or 60)))))
+    update_config("mix_amazon_pct", str(max(0, min(100, int(mix_amazon_pct or 0)))))
     return RedirectResponse(
         url="/?tab=config&cfg_sub=geral&saved_cfg=1", status_code=303
     )
 
 
-@app.post("/update-mix")
-async def update_mix(
+@app.post("/update-shopee-config")
+async def update_shopee_config(
     request: Request,
-    amazon_auto_enabled: str = Form(None),
-    ml_auto_enabled: str = Form(None),
-    mix_shopee_pct: str = Form("60"),
-    mix_amazon_pct: str = Form("0"),
     shopee_general_pct: str = Form("30"),
     shopee_custom_categories: str = Form(""),
     shopee_blocked_terms: str = Form(""),
     auto_keywords: str = Form(""),
-    amazon_bestsellers_pct: str = Form("60"),
-    amazon_bestsellers_url: str = Form("https://www.amazon.com.br/gp/bestsellers"),
-    amazon_deals_url: str = Form("https://www.amazon.com.br/deals"),
-    amazon_history_days: str = Form("7"),
-    custom_categories: str = Form(""),
-    ml_best_sellers_pct: str = Form("30"),
-    ml_history_days: str = Form("7"),
-    ml_bestsellers_url: str = Form("https://www.mercadolivre.com.br/mais-vendidos"),
-    ml_offers_url: str = Form("https://www.mercadolivre.com.br/ofertas"),
-    ml_min_price: str = Form("20"),
-    ml_max_price: str = Form("350"),
-    ml_min_discount: str = Form("12"),
-    ml_pages_per_run: str = Form("4"),
-    ml_max_page_pool: str = Form("15"),
-    custom_excl_bestsellers: str = Form(""),
-    ml_excluded_categories_offers: str = Form(""),
 ):
     form = await request.form()
-
-    # Mix
-    update_config("amazon_auto_enabled", "1" if amazon_auto_enabled == "1" else "0")
-    update_config("ml_auto_enabled", "1" if ml_auto_enabled == "1" else "0")
-    update_config("mix_shopee_pct", str(max(0, min(100, int(mix_shopee_pct or 60)))))
-    update_config("mix_amazon_pct", str(max(0, min(100, int(mix_amazon_pct or 0)))))
-
-    # Shopee (Checkboxes + Extras + Termos Bloqueados)
     update_config(
         "shopee_general_pct", str(max(0, min(100, int(shopee_general_pct or 30))))
     )
@@ -2420,21 +1941,27 @@ async def update_mix(
                 g_list.append(st.lower())
         update_config("dedup_blocked_terms", ", ".join(g_list))
 
-    # Amazon
-    update_config(
-        "amazon_bestsellers_pct",
-        str(max(0, min(100, int(amazon_bestsellers_pct or 60)))),
+    return RedirectResponse(
+        url="/?tab=config&cfg_sub=shopee&saved_cfg=1", status_code=303
     )
-    update_config("amazon_bestsellers_url", amazon_bestsellers_url.strip())
-    update_config("amazon_deals_url", amazon_deals_url.strip())
-    update_config("amazon_history_days", str(max(1, int(amazon_history_days or 7))))
 
-    selected_amz = form.getlist("amazon_cat_checks")
-    extra_amz = [c.strip() for c in custom_categories.split(",") if c.strip()]
-    all_amz = selected_amz + [e for e in extra_amz if e not in selected_amz]
-    update_config("amazon_target_categories", ", ".join(all_amz))
 
-    # ML Parametrizado
+@app.post("/update-ml-config")
+async def update_ml_config(
+    request: Request,
+    ml_best_sellers_pct: str = Form("30"),
+    ml_history_days: str = Form("7"),
+    ml_bestsellers_url: str = Form("https://www.mercadolivre.com.br/mais-vendidos"),
+    ml_offers_url: str = Form("https://www.mercadolivre.com.br/ofertas"),
+    ml_min_price: str = Form("20"),
+    ml_max_price: str = Form("350"),
+    ml_min_discount: str = Form("12"),
+    ml_pages_per_run: str = Form("4"),
+    ml_max_page_pool: str = Form("15"),
+    custom_ml_categories: str = Form(""),
+    ml_excluded_categories_offers: str = Form(""),
+):
+    form = await request.form()
     update_config(
         "ml_best_sellers_pct", str(max(0, min(100, int(ml_best_sellers_pct or 30))))
     )
@@ -2449,17 +1976,48 @@ async def update_mix(
     update_config("ml_pages_per_run", str(max(1, min(30, int(ml_pages_per_run or 4)))))
     update_config("ml_max_page_pool", str(max(1, min(50, int(ml_max_page_pool or 15)))))
 
-    checked_ml = form.getlist("excl_cat_checks")
-    all_ml_excl = list(checked_ml)
-    for extra in ml_auto.parse_csv_list(custom_excl_bestsellers):
-        if extra not in all_ml_excl:
-            all_ml_excl.append(extra)
-    update_config("ml_excluded_categories_bestsellers", ", ".join(all_ml_excl))
+    checked_ml = form.getlist("ml_cat_checks")
+    all_ml_target = list(checked_ml)
+    for extra in ml_auto.parse_ml_categories_list(custom_ml_categories):
+        if extra not in all_ml_target:
+            all_ml_target.append(extra)
+    update_config("ml_target_categories", "; ".join(all_ml_target))
+
+    checked_ml_subs = form.getlist("ml_subcat_checks")
+    update_config("ml_target_subcategories", "; ".join(checked_ml_subs))
     update_config(
         "ml_excluded_categories_offers", ml_excluded_categories_offers.strip()
     )
 
-    return RedirectResponse(url="/?tab=config&cfg_sub=mix&saved_cfg=1", status_code=303)
+    return RedirectResponse(url="/?tab=config&cfg_sub=ml&saved_cfg=1", status_code=303)
+
+
+@app.post("/update-amazon-config")
+async def update_amazon_config(
+    request: Request,
+    amazon_bestsellers_pct: str = Form("60"),
+    amazon_bestsellers_url: str = Form("https://www.amazon.com.br/gp/bestsellers"),
+    amazon_deals_url: str = Form("https://www.amazon.com.br/deals"),
+    amazon_history_days: str = Form("7"),
+    custom_categories: str = Form(""),
+):
+    form = await request.form()
+    update_config(
+        "amazon_bestsellers_pct",
+        str(max(0, min(100, int(amazon_bestsellers_pct or 60)))),
+    )
+    update_config("amazon_bestsellers_url", amazon_bestsellers_url.strip())
+    update_config("amazon_deals_url", amazon_deals_url.strip())
+    update_config("amazon_history_days", str(max(1, int(amazon_history_days or 7))))
+
+    selected_amz = form.getlist("amazon_cat_checks")
+    extra_amz = [c.strip() for c in custom_categories.split(",") if c.strip()]
+    all_amz = selected_amz + [e for e in extra_amz if e not in selected_amz]
+    update_config("amazon_target_categories", ", ".join(all_amz))
+
+    return RedirectResponse(
+        url="/?tab=config&cfg_sub=amazon&saved_cfg=1", status_code=303
+    )
 
 
 @app.post("/comparator/update-settings")
@@ -2553,10 +2111,18 @@ async def update_ai_config(
     ai_copy_enabled: str = Form(None),
     ai_copy_style: str = Form("urgencia_comparativo"),
     ai_copy_custom_prompt: str = Form(""),
+    ai_copy_model: str = Form("gemini-2.5-flash"),
 ):
     update_config("ai_copy_enabled", "1" if ai_copy_enabled == "1" else "0")
     update_config("ai_copy_style", ai_copy_style.strip())
     update_config("ai_copy_custom_prompt", ai_copy_custom_prompt.strip())
+    update_config("ai_copy_model", ai_copy_model.strip())
+    return RedirectResponse(url="/?tab=config&cfg_sub=ia&saved_cfg=1", status_code=303)
+
+
+@app.post("/ai/sync-models")
+async def sync_ai_models():
+    await asyncio.to_thread(ai_copy_service.discover_and_test_gemini_models)
     return RedirectResponse(url="/?tab=config&cfg_sub=ia&saved_cfg=1", status_code=303)
 
 
@@ -2566,6 +2132,24 @@ async def remove_offer(offer_id: int, current_date: str = Form(...)):
     _PORTAL_CACHE["comp"]["ts"] = 0.0
     return RedirectResponse(
         url=f"/?tab=fila&selected_date={current_date}", status_code=303
+    )
+
+
+@app.post("/delete-pending")
+async def remove_all_pending(target_date: str = Form(...)):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM queue WHERE target_date = ? AND status = 'pending'",
+        (target_date,),
+    )
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    _PORTAL_CACHE["comp"]["ts"] = 0.0
+    return RedirectResponse(
+        url=f"/?tab=fila&selected_date={target_date}&deleted_pending={deleted_count}",
+        status_code=303,
     )
 
 

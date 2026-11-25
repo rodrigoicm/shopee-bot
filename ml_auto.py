@@ -1,6 +1,7 @@
 """
 Motor de Busca Automática e Laboratório de Validação do Mercado Livre.
-100% parametrizado via banco de dados (Portal Web) — sem filtros fixos no código.
+Coleta 100% anônima via Playwright (Chrome real em --headless=new, sem ML_AFFILIATE_COOKIE)
+e suporte completo a categorias e subcategorias dinâmicas.
 """
 
 import html as html_lib
@@ -16,9 +17,10 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
 
 from database import DB_NAME, add_to_queue, get_config, update_config
-from ml_affiliate import clean_url, create_affiliate_link_full
+from ml_affiliate import clean_url
 from ml_social import build_ml_image_url
 import ml_offer
 import offer_comparator
@@ -29,36 +31,42 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 CUIABA_TZ = timezone(timedelta(hours=-4))
 
-KNOWN_ML_CATEGORIES = [
-    "Games",
-    "Informática",
-    "Acessórios para Veículos",
-    "Alimentos e Bebidas",
-    "Arte, Papelaria e Armarinho",
-    "Bebês",
-    "Beleza e Cuidado Pessoal",
-    "Brinquedos e Hobbies",
-    "Calçados, Roupas e Bolsas",
-    "Casa, Móveis e Decoração",
-    "Celulares e Telefones",
-    "Construção",
-    "Câmeras e Acessórios",
-    "Eletrodomésticos",
-    "Eletrônicos, Áudio e Vídeo",
-    "Esportes e Fitness",
-    "Ferramentas",
-    "Festas e Lembrancinhas",
-    "Indústria e Comércio",
-    "Instrumentos Musicais",
-    "Joias e Relógios",
-    "Livros, Revistas e Comics",
-    "Pet Shop",
-    "Saúde",
-]
+DEFAULT_ML_TARGET_CATEGORIES = (
+    "Alimentos e Bebidas; Bebês; Beleza e Cuidado Pessoal; Brinquedos e Hobbies; "
+    "Casa, Móveis e Decoração; Celulares e Telefones; Construção; Eletrodomésticos; "
+    "Esportes e Fitness; Ferramentas; Pet Shop; Saúde"
+)
+
+# Fallback estático caso a API pública de categorias do ML falhe na sincronização
+DEFAULT_ML_CATEGORIES_MAP = {
+    "Acessórios para Veículos": {"id": "MLB5672", "children": []},
+    "Alimentos e Bebidas": {"id": "MLB1403", "children": []},
+    "Arte, Papelaria e Armarinho": {"id": "MLB1367", "children": []},
+    "Bebês": {"id": "MLB1384", "children": []},
+    "Beleza e Cuidado Pessoal": {"id": "MLB1246", "children": []},
+    "Brinquedos e Hobbies": {"id": "MLB1132", "children": []},
+    "Calçados, Roupas e Bolsas": {"id": "MLB1430", "children": []},
+    "Casa, Móveis e Decoração": {"id": "MLB1574", "children": []},
+    "Celulares e Telefones": {"id": "MLB1051", "children": []},
+    "Construção": {"id": "MLB1500", "children": []},
+    "Câmeras e Acessórios": {"id": "MLB1039", "children": []},
+    "Eletrodomésticos": {"id": "MLB5726", "children": []},
+    "Eletrônicos, Áudio e Vídeo": {"id": "MLB1000", "children": []},
+    "Esportes e Fitness": {"id": "MLB1276", "children": []},
+    "Ferramentas": {"id": "MLB263532", "children": []},
+    "Festas e Lembrancinhas": {"id": "MLB12404", "children": []},
+    "Games": {"id": "MLB1144", "children": []},
+    "Informática": {"id": "MLB1648", "children": []},
+    "Instrumentos Musicais": {"id": "MLB1182", "children": []},
+    "Joias e Relógios": {"id": "MLB3937", "children": []},
+    "Livros, Revistas e Comics": {"id": "MLB1196", "children": []},
+    "Pet Shop": {"id": "MLB1071", "children": []},
+    "Saúde": {"id": "MLB264586", "children": []},
+}
 
 
 def ensure_ml_auto_schema() -> None:
-    """Garante a tabela ml_history e inicializa as configurações no banco (editáveis no Portal)."""
+    """Garante a tabela ml_history e inicializa as configurações no banco."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
@@ -78,7 +86,7 @@ def ensure_ml_auto_schema() -> None:
         "mix_shopee_pct": "60",
         "ml_best_sellers_pct": "30",
         "ml_history_days": "7",
-        "ml_excluded_categories_bestsellers": "Games, Informática",
+        "ml_target_categories": DEFAULT_ML_TARGET_CATEGORIES,
         "ml_excluded_categories_offers": "",
         "ml_bestsellers_url": "https://www.mercadolivre.com.br/mais-vendidos",
         "ml_offers_url": (
@@ -104,32 +112,6 @@ def ensure_ml_auto_schema() -> None:
 ensure_ml_auto_schema()
 
 
-def _build_ml_headers() -> dict:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-    }
-    cookie_env = (os.environ.get("ML_AFFILIATE_COOKIE") or "").strip().strip("'\"")
-    if cookie_env:
-        headers["Cookie"] = cookie_env
-    return headers
-
-
 def _normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -141,6 +123,258 @@ def parse_csv_list(raw_csv: str | None) -> list[str]:
     if not raw_csv:
         return []
     return [item.strip() for item in re.split(r"[,;\n]+", raw_csv) if item.strip()]
+
+
+def parse_ml_categories_list(raw_val: str | None) -> list[str]:
+    """
+    Usa ';' ou quebra de linha como separador para não quebrar nomes com vírgula
+    como 'Casa, Móveis e Decoração' ou 'Calçados, Roupas e Bolsas'.
+    """
+    if not raw_val:
+        return []
+    return [item.strip() for item in re.split(r"[;\n\r]+", raw_val) if item.strip()]
+
+
+def get_available_ml_categories() -> dict:
+    """Retorna o dicionário de categorias + subcategorias do ML do cache ou fallback."""
+    try:
+        cached = get_config("ml_cached_categories_json")
+        if cached:
+            data = json.loads(cached)
+            if isinstance(data, dict) and data:
+                return data
+    except Exception:
+        pass
+    return DEFAULT_ML_CATEGORIES_MAP
+
+
+def fetch_dynamic_ml_categories() -> tuple[dict, bool]:
+    """
+    Busca a árvore oficial de categorias e subcategorias do Mercado Livre Brasil
+    via API pública (sem necessidade de login) e salva no banco.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        resp = requests.get(
+            "https://api.mercadolibre.com/sites/MLB/categories",
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return get_available_ml_categories(), False
+
+        roots = resp.json()
+        if not isinstance(roots, list) or not roots:
+            return get_available_ml_categories(), False
+
+        result: dict = {}
+        session = requests.Session()
+        for root in roots:
+            cat_id = str(root.get("id") or "").strip()
+            cat_name = str(root.get("name") or "").strip()
+            if not cat_id or not cat_name:
+                continue
+
+            children_list = []
+            try:
+                r_det = session.get(
+                    f"https://api.mercadolibre.com/categories/{cat_id}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if r_det.status_code == 200:
+                    det = r_det.json()
+                    for ch in det.get("children_categories") or []:
+                        ch_id = str(ch.get("id") or "").strip()
+                        ch_name = str(ch.get("name") or "").strip()
+                        if ch_id and ch_name:
+                            children_list.append({"id": ch_id, "name": ch_name})
+            except Exception:
+                pass
+
+            result[cat_name] = {"id": cat_id, "children": children_list}
+
+        if result:
+            sorted_res = dict(
+                sorted(result.items(), key=lambda kv: _normalize_text(kv[0]))
+            )
+            update_config(
+                "ml_cached_categories_json",
+                json.dumps(sorted_res, ensure_ascii=False),
+            )
+            update_config(
+                "ml_categories_updated_at",
+                datetime.now(CUIABA_TZ).strftime("%d/%m/%Y %H:%M"),
+            )
+            return sorted_res, True
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao sincronizar categorias do ML: {e}")
+
+    return get_available_ml_categories(), False
+
+
+def _resolve_target_mlb_ids(
+    target_categories: list[str] | None = None,
+    target_subcategories: list[str] | None = None,
+) -> list[tuple[str, str]]:
+    """
+    Resolve a lista de (MLB_ID, label) que devem ser consultados.
+    - Se houver subcategorias marcadas para uma categoria pai, usa as subcategorias selecionadas.
+    - Se todas as subcategorias da categoria pai estiverem marcadas (ou não houver subcategorias),
+      usa o ID da categoria pai para evitar excesso de requisições.
+    """
+    available = get_available_ml_categories()
+    if target_categories is None:
+        target_categories = parse_ml_categories_list(
+            get_config("ml_target_categories") or ""
+        )
+
+    subcats_raw = get_config("ml_target_subcategories")
+    has_subcats_cfg = subcats_raw is not None
+    if target_subcategories is None:
+        target_subcategories = (
+            [s.strip() for s in subcats_raw.split(";") if s.strip()]
+            if has_subcats_cfg
+            else []
+        )
+    subcats_set = set(target_subcategories)
+
+    target_norm = {_normalize_text(c) for c in target_categories if c.strip()}
+    resolved: list[tuple[str, str]] = []
+
+    for cat_name, meta in available.items():
+        if _normalize_text(cat_name) not in target_norm:
+            continue
+        cat_id = (meta or {}).get("id")
+        children = (meta or {}).get("children") or []
+
+        if has_subcats_cfg and children:
+            selected_children = [ch for ch in children if ch.get("id") in subcats_set]
+            if len(selected_children) == len(children) and cat_id:
+                resolved.append((cat_id, cat_name))
+            elif selected_children:
+                for ch in selected_children:
+                    resolved.append((ch["id"], f"{cat_name} › {ch['name']}"))
+            # Se o usuário desmarcou todas as subcategorias dessa categoria, não inclui
+        elif cat_id:
+            resolved.append((cat_id, cat_name))
+
+    return resolved
+
+
+# ───────────── MOTOR ANÔNIMO VIA PLAYWRIGHT (--headless=new) ─────────────
+class _MLAnonymousBrowser:
+    """
+    Sessão anônima única no Chrome real do Windows (--headless=new).
+    Não envia ML_AFFILIATE_COOKIE; faz warm-up na Home uma única vez por execução.
+    """
+
+    def __init__(self):
+        self._pw = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self._warmed_up = False
+
+    def __enter__(self):
+        self._pw = sync_playwright().start()
+        try:
+            self.browser = self._pw.chromium.launch(
+                channel="chrome",
+                headless=True,
+                args=[
+                    "--headless=new",
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                ],
+            )
+        except Exception:
+            # Fallback para o Chromium embutido do Playwright caso Chrome não esteja instalado
+            self.browser = self._pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                ],
+            )
+
+        temp_ctx = self.browser.new_context()
+        temp_page = temp_ctx.new_page()
+        real_ua = temp_page.evaluate("() => navigator.userAgent")
+        clean_ua = real_ua.replace("HeadlessChrome", "Chrome")
+        temp_ctx.close()
+
+        self.context = self.browser.new_context(
+            viewport={"width": 1366, "height": 768},
+            locale="pt-BR",
+            timezone_id="America/Cuiaba",
+            user_agent=clean_ua,
+        )
+        self.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
+        self.page = self.context.new_page()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for obj in (self.context, self.browser):
+            if obj:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+        if self._pw:
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
+
+    def warmup(self) -> None:
+        if self._warmed_up or not self.page:
+            return
+        try:
+            self.page.goto(
+                "https://www.mercadolivre.com.br/",
+                wait_until="domcontentloaded",
+                timeout=25000,
+            )
+            time.sleep(random.uniform(1.5, 2.5))
+            self._warmed_up = True
+        except Exception as e:
+            logger.warning(f"⚠️ Aviso no warm-up anônimo do ML: {e}")
+
+    def get_nordic_ctx(self, url: str, referer: str | None = None) -> dict | None:
+        if not self.page:
+            return None
+        self.warmup()
+        try:
+            self.page.goto(
+                url,
+                referer=referer or "https://www.mercadolivre.com.br/",
+                wait_until="domcontentloaded",
+                timeout=25000,
+            )
+            time.sleep(random.uniform(1.4, 2.4))
+            self.page.mouse.wheel(0, 500)
+            time.sleep(0.35)
+
+            ctx = self.page.evaluate(
+                "() => (window._n && window._n.ctx && window._n.ctx.r) ? window._n.ctx.r : null"
+            )
+            if isinstance(ctx, dict) and ctx:
+                return ctx
+
+            return _extract_nordic_ctx(self.page.content())
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao carregar {url} no navegador anônimo ML: {e}")
+            return None
 
 
 def extract_ml_item_key(url: str, metadata: dict | None = None) -> str:
@@ -169,10 +403,6 @@ def extract_ml_item_key(url: str, metadata: dict | None = None) -> str:
 
 
 def _extract_product_core_signature(title: str) -> str:
-    """
-    Extrai as 4 primeiras palavras substantivas do título (ignorando voltagem, cor e medidas)
-    para barrar o mesmo produto anunciado por vendedores diferentes ou em variações 110v/220v.
-    """
     norm = _normalize_text(title)
     norm = re.sub(r"\b\d+(?:ml|l|g|kg|w|v|cm|mm|m|un|pcs|pecas|x|bivolt)\b", " ", norm)
     norm = re.sub(r"[^a-z0-9\s]", " ", norm)
@@ -226,7 +456,6 @@ def _extract_product_core_signature(title: str) -> str:
 
 
 def _load_ml_history_blocklist(days: int = 7) -> tuple[set[str], set[str], list[str]]:
-    """Lê ml_history e queue dos últimos N dias para impedir repetição de produtos no ML."""
     cutoff = (datetime.now(CUIABA_TZ) - timedelta(days=max(1, days))).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -488,72 +717,113 @@ def _find_offer_cards_recursively(node, found_cards: list):
 
 
 def fetch_ml_best_sellers_candidates(
-    excluded_categories: list[str] | None = None,
+    target_categories: list[str] | None = None,
+    browser: _MLAnonymousBrowser | None = None,
 ) -> tuple[list[dict], list[str], dict[str, int]]:
-    if excluded_categories is None:
-        excluded_categories = parse_csv_list(
-            get_config("ml_excluded_categories_bestsellers") or ""
-        )
-    excluded_norm = [_normalize_text(c) for c in excluded_categories if c.strip()]
-
     bestsellers_url = (
-        get_config("ml_bestsellers_url")
-        or "https://www.mercadolivre.com.br/mais-vendidos"
-    ).strip()
+        (
+            get_config("ml_bestsellers_url")
+            or "https://www.mercadolivre.com.br/mais-vendidos"
+        )
+        .strip()
+        .rstrip("/")
+    )
     min_price = float(get_config("ml_min_price") or "0")
     max_price = float(get_config("ml_max_price") or "0")
 
-    session = requests.Session()
-    resp = session.get(bestsellers_url, headers=_build_ml_headers(), timeout=20)
-    resp.raise_for_status()
-
-    ctx = _extract_nordic_ctx(resp.text)
-    if not ctx:
-        logger.warning("⚠️ _n.ctx.r não encontrado em Mais Vendidos.")
-        return [], [], {}
-
-    carousels = []
-    _find_carousels_recursively(ctx, carousels)
+    target_pairs = _resolve_target_mlb_ids(target_categories=target_categories)
+    target_cats_list = (
+        target_categories
+        if target_categories is not None
+        else parse_ml_categories_list(get_config("ml_target_categories") or "")
+    )
+    target_norm = {_normalize_text(c) for c in target_cats_list if c.strip()}
 
     candidates: list[dict] = []
     blocked_cats: list[str] = []
     accepted_cats: dict[str, int] = {}
+    seen_keys: set[str] = set()
 
-    for car in carousels:
-        raw_title = car.get("title") or ""
-        cat_clean = re.sub(
-            r"^Mais vendidos em\s+", "", raw_title, flags=re.IGNORECASE
-        ).strip()
-        if not cat_clean:
-            cat_clean = "Geral"
-        cat_norm = _normalize_text(cat_clean)
+    def _run_with_browser(br: _MLAnonymousBrowser):
+        # Se houver categorias/subcategorias selecionadas, sorteia até 3 delas para buscar em /mais-vendidos/{MLB_ID}
+        if target_pairs:
+            chosen_pairs = random.sample(target_pairs, k=min(5, len(target_pairs)))
+            for mlb_id, cat_label in chosen_pairs:
+                url = f"{bestsellers_url}/{mlb_id}"
+                ctx = br.get_nordic_ctx(url, referer=bestsellers_url)
+                if not ctx:
+                    continue
+                raw_cards = []
+                _find_offer_cards_recursively(ctx, raw_cards)
+                count_ok = 0
+                for card in raw_cards:
+                    parsed = _parse_polycard(
+                        card,
+                        source_type="best_sellers",
+                        category_name=f"ML: {cat_label}",
+                    )
+                    if not parsed or parsed["item_key"] in seen_keys:
+                        continue
+                    price_val = parsed.get("current_price") or 0
+                    if min_price > 0 and price_val < min_price:
+                        continue
+                    if max_price > 0 and price_val > max_price:
+                        continue
+                    seen_keys.add(parsed["item_key"])
+                    candidates.append(parsed)
+                    count_ok += 1
+                if count_ok > 0:
+                    accepted_cats[cat_label] = (
+                        accepted_cats.get(cat_label, 0) + count_ok
+                    )
+        else:
+            ctx = br.get_nordic_ctx(bestsellers_url)
+            if not ctx:
+                return
+            carousels = []
+            _find_carousels_recursively(ctx, carousels)
+            for car in carousels:
+                raw_title = car.get("title") or ""
+                cat_clean = (
+                    re.sub(
+                        r"^Mais vendidos em\s+", "", raw_title, flags=re.IGNORECASE
+                    ).strip()
+                    or "Geral"
+                )
+                cat_norm = _normalize_text(cat_clean)
+                if target_norm and not any(
+                    t in cat_norm or cat_norm in t for t in target_norm
+                ):
+                    if cat_clean not in blocked_cats:
+                        blocked_cats.append(cat_clean)
+                    continue
+                count_ok = 0
+                for card in car.get("polycards") or []:
+                    parsed = _parse_polycard(
+                        card,
+                        source_type="best_sellers",
+                        category_name=f"ML: {cat_clean}",
+                    )
+                    if not parsed or parsed["item_key"] in seen_keys:
+                        continue
+                    price_val = parsed.get("current_price") or 0
+                    if min_price > 0 and price_val < min_price:
+                        continue
+                    if max_price > 0 and price_val > max_price:
+                        continue
+                    seen_keys.add(parsed["item_key"])
+                    candidates.append(parsed)
+                    count_ok += 1
+                if count_ok > 0:
+                    accepted_cats[cat_clean] = (
+                        accepted_cats.get(cat_clean, 0) + count_ok
+                    )
 
-        if any(excl in cat_norm or cat_norm in excl for excl in excluded_norm if excl):
-            if cat_clean not in blocked_cats:
-                blocked_cats.append(cat_clean)
-            continue
-
-        count_ok = 0
-        for card in car.get("polycards") or []:
-            parsed = _parse_polycard(
-                card,
-                source_type="best_sellers",
-                category_name=f"ML: {cat_clean}",
-            )
-            if not parsed:
-                continue
-
-            price_val = parsed.get("current_price") or 0
-            if min_price > 0 and price_val < min_price:
-                continue
-            if max_price > 0 and price_val > max_price:
-                continue
-
-            candidates.append(parsed)
-            count_ok += 1
-
-        if count_ok > 0:
-            accepted_cats[cat_clean] = accepted_cats.get(cat_clean, 0) + count_ok
+    if browser is not None:
+        _run_with_browser(browser)
+    else:
+        with _MLAnonymousBrowser() as br:
+            _run_with_browser(br)
 
     return candidates, blocked_cats, accepted_cats
 
@@ -562,18 +832,17 @@ def fetch_ml_offers_candidates(
     offers_url: str | None = None,
     excluded_terms: list[str] | None = None,
     max_pages: int | None = None,
+    target_categories: list[str] | None = None,
+    browser: _MLAnonymousBrowser | None = None,
 ) -> list[dict]:
     """
-    Coleta produtos das páginas de Ofertas configuradas no Portal:
-    - Suporta múltiplas URLs em `ml_offers_url` (separadas por linha ou vírgula)
-    - Sorteia `ml_pages_per_run` páginas dentro do alcance `ml_max_page_pool` (ex: páginas de 1 até 20)
-    - Se a página não retornar itens (fim da paginação), interrompe aquela URL automaticamente.
+    Coleta ofertas do Mercado Livre em modo anônimo (Playwright --headless=new),
+    aplicando ?category={MLB_ID} para as categorias/subcategorias marcadas.
     """
     raw_urls_cfg = (offers_url or get_config("ml_offers_url") or "").strip()
     base_urls = [u.strip() for u in re.split(r"[,;\n\r]+", raw_urls_cfg) if u.strip()]
     if not base_urls:
-        logger.warning("⚠️ Nenhuma URL configurada em ml_offers_url no Portal.")
-        return []
+        base_urls = ["https://www.mercadolivre.com.br/ofertas"]
 
     min_price = float(get_config("ml_min_price") or "0")
     max_price = float(get_config("ml_max_price") or "0")
@@ -592,44 +861,53 @@ def fetch_ml_offers_candidates(
         )
     excluded_norm = [_normalize_text(t) for t in excluded_terms if t.strip()]
 
-    session = requests.Session()
-    headers = _build_ml_headers()
+    target_pairs = _resolve_target_mlb_ids(target_categories=target_categories)
     candidates: list[dict] = []
     seen_keys: set[str] = set()
 
-    for base_url in base_urls:
-        base_url_clean = base_url.split("#")[0]
-        is_lightning = "lightning" in base_url_clean.lower()
-        cat_label = "ML: Oferta Relâmpago ⚡" if is_lightning else "ML: Ofertas"
-
-        # Garante sempre a página 1 + sorteia o restante no universo de 2 até max_page_pool
-        if max_page_pool <= pages_per_run:
-            pages_to_fetch = list(range(1, max_page_pool + 1))
+    def _run_with_browser(br: _MLAnonymousBrowser):
+        # Monta a fila de consultas: combina URLs base com categorias/subcategorias sorteadas
+        queries: list[tuple[str, str, str]] = []
+        if target_pairs:
+            chosen_pairs = random.sample(target_pairs, k=min(5, len(target_pairs)))
+            for base_url in base_urls:
+                base_clean = base_url.split("#")[0]
+                is_light = "lightning" in base_clean.lower()
+                for mlb_id, cat_label in chosen_pairs:
+                    sep = "&" if "?" in base_clean else "?"
+                    q_url = f"{base_clean}{sep}category={mlb_id}"
+                    lbl = f"ML ⚡ {cat_label}" if is_light else f"ML: {cat_label}"
+                    queries.append((q_url, lbl, base_clean))
         else:
-            extra_pages = random.sample(
-                range(2, max_page_pool + 1), k=max(0, pages_per_run - 1)
-            )
-            pages_to_fetch = [1] + sorted(extra_pages)
+            for base_url in base_urls:
+                base_clean = base_url.split("#")[0]
+                is_light = "lightning" in base_clean.lower()
+                lbl = "ML: Oferta Relâmpago ⚡" if is_light else "ML: Ofertas"
+                queries.append((base_clean, lbl, "https://www.mercadolivre.com.br/"))
 
-        for page_num in pages_to_fetch:
-            sep = "&" if "?" in base_url_clean else "?"
-            page_url = (
-                base_url_clean
-                if page_num == 1
-                else f"{base_url_clean}{sep}page={page_num}"
-            )
-            try:
-                resp = session.get(page_url, headers=headers, timeout=20)
-                if resp.status_code != 200:
-                    break
-                ctx = _extract_nordic_ctx(resp.text)
+        # Limita o total de páginas para manter a busca ágil
+        pages_per_query = 1 if len(queries) > 4 else max(1, min(pages_per_run, 2))
+
+        for q_url, cat_label, ref_url in queries:
+            if max_page_pool <= pages_per_query:
+                pages_to_fetch = list(range(1, max_page_pool + 1))
+            else:
+                extra = random.sample(
+                    range(2, min(max_page_pool, 10) + 1),
+                    k=max(0, pages_per_query - 1),
+                )
+                pages_to_fetch = [1] + sorted(extra)
+
+            for page_num in pages_to_fetch:
+                sep = "&" if "?" in q_url else "?"
+                page_url = q_url if page_num == 1 else f"{q_url}{sep}page={page_num}"
+                ctx = br.get_nordic_ctx(page_url, referer=ref_url)
                 if not ctx:
                     break
 
                 raw_cards = []
                 _find_offer_cards_recursively(ctx, raw_cards)
                 if not raw_cards:
-                    # Fim das páginas disponíveis para esta URL
                     break
 
                 for card in raw_cards:
@@ -638,9 +916,7 @@ def fetch_ml_offers_candidates(
                         source_type="offers",
                         category_name=cat_label,
                     )
-                    if not parsed:
-                        continue
-                    if parsed["item_key"] in seen_keys:
+                    if not parsed or parsed["item_key"] in seen_keys:
                         continue
 
                     price_val = parsed.get("current_price") or 0
@@ -655,8 +931,6 @@ def fetch_ml_offers_candidates(
                         if disc_pct < min_discount:
                             continue
 
-                    seen_keys.add(parsed["item_key"])
-
                     if excluded_norm:
                         t_norm = _normalize_text(parsed["title"])
                         u_norm = _normalize_text(parsed["clean_url"])
@@ -665,15 +939,21 @@ def fetch_ml_offers_candidates(
                         ):
                             continue
 
+                    seen_keys.add(parsed["item_key"])
                     candidates.append(parsed)
-            except Exception as e:
-                logger.warning(f"Erro ao ler página {page_num} de Ofertas ML: {e}")
-                continue
+
+    if browser is not None:
+        _run_with_browser(browser)
+    else:
+        with _MLAnonymousBrowser() as br:
+            _run_with_browser(br)
 
     return candidates
 
 
-def simulate_ml_offers_selection(count: int = 10) -> dict:
+def simulate_ml_offers_selection(
+    count: int = 10, categories_override: list[str] | None = None
+) -> dict:
     t0 = time.perf_counter()
 
     best_pct = int(get_config("ml_best_sellers_pct") or "30")
@@ -689,8 +969,14 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
         target_best = 1
     target_offers = max(0, count - target_best)
 
-    best_raw, blocked_cats, accepted_cats = fetch_ml_best_sellers_candidates()
-    offers_raw = fetch_ml_offers_candidates()
+    # Usa UMA única sessão anônima para buscar Mais Vendidos + Ofertas
+    with _MLAnonymousBrowser() as br:
+        best_raw, blocked_cats, accepted_cats = fetch_ml_best_sellers_candidates(
+            target_categories=categories_override, browser=br
+        )
+        offers_raw = fetch_ml_offers_candidates(
+            target_categories=categories_override, browser=br
+        )
 
     preloaded_profiles = offer_comparator.load_recent_queue_profiles(days=dedup_days)
     used_ml_keys, used_ml_cores, used_ml_titles = _load_ml_history_blocklist(
@@ -703,9 +989,13 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
     accepted_titles: list[str] = list(used_ml_titles)
     seen_keys: set[str] = set(used_ml_keys)
     seen_cores: set[str] = set(used_ml_cores)
+    seen_batch_cats: dict[str, int] = {}
+    seen_batch_types: set[str] = set()
     skipped_duplicates = 0
 
-    def _pick_from_pool(pool: list[dict], needed: int) -> list[dict]:
+    def _pick_from_pool(
+        pool: list[dict], needed: int, max_per_cat: int = 1
+    ) -> list[dict]:
         nonlocal skipped_duplicates
         picked = []
         for item in pool:
@@ -716,12 +1006,26 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
                 skipped_duplicates += 1
                 continue
 
+            # Trava de variedade por categoria no mesmo lote
+            cat_base = (
+                re.sub(r"^ML[:\s⚡]+", "", item.get("category_name") or "")
+                .strip()
+                .lower()
+            )
+            if cat_base and seen_batch_cats.get(cat_base, 0) >= max_per_cat:
+                continue
+
+            # Trava de mesmo tipo de produto (ex: não pegar 2 tênis no mesmo lote)
+            prod_type = ShopeeAffiliateAPI._extract_product_type_key(item["title"])
+            if prod_type and prod_type in seen_batch_types:
+                continue
+
             core_sig = _extract_product_core_signature(item["title"])
             if len(core_sig.split()) >= 3 and core_sig in seen_cores:
                 skipped_duplicates += 1
                 continue
 
-            is_dup, reason = offer_comparator.is_product_recently_used_or_blocked(
+            is_dup, _ = offer_comparator.is_product_recently_used_or_blocked(
                 candidate_title=item["title"],
                 candidate_url=item["clean_url"],
                 days=dedup_days,
@@ -735,6 +1039,10 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
                 continue
 
             seen_keys.add(ik)
+            if cat_base:
+                seen_batch_cats[cat_base] = seen_batch_cats.get(cat_base, 0) + 1
+            if prod_type:
+                seen_batch_types.add(prod_type)
             if len(core_sig.split()) >= 3:
                 seen_cores.add(core_sig)
             accepted_titles.append(item["title"])
@@ -753,7 +1061,7 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
     total_got = len(chosen_best) + len(chosen_offers)
     if total_got < count:
         missing = count - total_got
-        extra = _pick_from_pool(offers_raw + best_raw, missing)
+        extra = _pick_from_pool(offers_raw + best_raw, missing, max_per_cat=2)
         chosen_offers.extend(extra)
 
     final_items = []
@@ -765,6 +1073,11 @@ def simulate_ml_offers_selection(count: int = 10) -> dict:
                 final_items.append(co.pop(0))
         if cb:
             final_items.append(cb.pop(0))
+
+    # Consolida contagem de categorias aceitas também das ofertas
+    for it in offers_raw:
+        c_lbl = it.get("category_name", "ML: Ofertas")
+        accepted_cats[c_lbl] = accepted_cats.get(c_lbl, 0) + 1
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
 
@@ -820,7 +1133,6 @@ def convert_and_enqueue_ml_item(
             category=category_name,
         )
 
-        # Grava no ml_history TANTO o item_key do card QUANTO o item_id final (caso seja /p/ redirecionado)
         try:
             keys_to_save = set()
             if fallback_card_data and fallback_card_data.get("item_key"):
@@ -956,6 +1268,9 @@ def generate_mixed_auto_offers_to_queue(
     amazon_target = round(total_count * amazon_pct / total_pct)
     ml_target = max(0, total_count - shopee_target - amazon_target)
 
+    t_total = time.perf_counter()
+
+    t0 = time.perf_counter()
     amazon_added = 0
     amazon_fallbacks: list[str] = []
     if amazon_target > 0:
@@ -964,10 +1279,17 @@ def generate_mixed_auto_offers_to_queue(
         res = generate_amazon_auto_offers_to_queue(amazon_target, target_date)
         amazon_added = res["added"]
         amazon_fallbacks = res["fallbacks"]
+    t_amz = time.perf_counter() - t0
 
     ml_added = 0
+    t_ml_sim = 0.0
+    t_ml_conv = 0.0
     if ml_target > 0:
+        t0 = time.perf_counter()
         sim = simulate_ml_offers_selection(count=ml_target + 3)
+        t_ml_sim = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         for cand in sim["items"]:
             if ml_added >= ml_target:
                 break
@@ -979,7 +1301,9 @@ def generate_mixed_auto_offers_to_queue(
                 cand,
             ):
                 ml_added += 1
+        t_ml_conv = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     missing = (amazon_target - amazon_added) + (ml_target - ml_added)
     shopee_actual = shopee_target + missing
     shopee_added = 0
@@ -993,9 +1317,17 @@ def generate_mixed_auto_offers_to_queue(
                 target_date=target_date,
                 keywords_csv=keywords_csv,
             )
+    t_shp = time.perf_counter() - t0
 
     if sum([shopee_added, amazon_added, ml_added]) > 1:
         _interleave_pending_auto_queue(target_date)
+
+    logger.info(
+        f"⏱️ [TIMING LOTE] Total={time.perf_counter() - t_total:.1f}s | "
+        f"Amazon={t_amz:.1f}s | ML_Busca={t_ml_sim:.1f}s | "
+        f"ML_Conv+IA={t_ml_conv:.1f}s ({ml_added} itens) | "
+        f"Shopee={t_shp:.1f}s ({shopee_added} itens)"
+    )
 
     return {
         "total_added": shopee_added + amazon_added + ml_added,

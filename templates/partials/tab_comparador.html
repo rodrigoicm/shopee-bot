@@ -1,0 +1,67 @@
+<div class="tab-pane fade {{ 'show active' if tab == 'comparador' else '' }}" role="tabpanel">
+    <div class="bg-white p-3 rounded-3 shadow-sm mb-3">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <form method="GET" action="/" class="d-flex flex-wrap gap-2 align-items-center m-0 flex-grow-1">
+                <input type="hidden" name="tab" value="comparador">
+                <input type="hidden" name="selected_date" value="{{ current_date }}">
+                <input type="hidden" name="comp_page" value="1">
+
+                <span class="fw-bold small">Período:</span>
+                <select name="comp_days" class="form-select form-select-sm" style="width:auto;" onchange="this.form.submit()">
+                    <option value="7" {{ 'selected' if scan_days == 7 else '' }}>Últimos 7 dias</option>
+                    <option value="14" {{ 'selected' if scan_days == 14 else '' }}>Últimos 14 dias</option>
+                    <option value="30" {{ 'selected' if scan_days == 30 else '' }}>Últimos 30 dias</option>
+                    <option value="60" {{ 'selected' if scan_days == 60 else '' }}>Últimos 60 dias</option>
+                    <option value="0" {{ 'selected' if scan_days == 0 else '' }}>Todo o histórico</option>
+                </select>
+
+                <select name="comp_store" class="form-select form-select-sm" style="width:auto;" onchange="this.form.submit()">
+                    <option value="all" {{ 'selected' if comp_store == 'all' else '' }}>🌐 Todas as Lojas</option>
+                    <option value="shopee" {{ 'selected' if comp_store == 'shopee' else '' }}>🟠 Shopee</option>
+                    <option value="amazon" {{ 'selected' if comp_store == 'amazon' else '' }}>🟠 Amazon</option>
+                    <option value="mercado" {{ 'selected' if comp_store == 'mercado' else '' }}>🟡 Mercado Livre</option>
+                </select>
+
+                <div class="input-group input-group-sm" style="max-width: 280px;">
+                    <input type="text" name="comp_search" value="{{ comp_search }}" placeholder="🔍 Pesquisar produto, termo ou link..." class="form-control">
+                    <button type="submit" class="btn btn-outline-primary">Buscar</button>
+                    {% if comp_search %}
+                    <a href="/?tab=comparador&selected_date={{ current_date }}&comp_days={{ scan_days }}&comp_store={{ comp_store }}" class="btn btn-outline-secondary" title="Limpar busca">✕</a>
+                    {% endif %}
+                </div>
+
+                <span class="badge bg-secondary">Analisados: {{ comp_report.total_scanned }}</span>
+                <span class="badge bg-danger">Conflitos: {{ comp_filtered_total }}{% if comp_search %} / {{ comp_report.total_clusters }}{% endif %}</span>
+            </form>
+
+            <form action="/comparator/clean-duplicates" method="POST" class="m-0">
+                <input type="hidden" name="comp_days" value="{{ scan_days }}">
+                <input type="hidden" name="comp_store" value="{{ comp_store }}">
+                <button type="submit" class="btn btn-sm btn-danger fw-bold" {{ 'disabled' if comp_report.total_suggested_deletes == 0 else '' }}>
+                    🧹 Excluir {{ comp_report.total_suggested_deletes }} Duplicadas Pendentes
+                </button>
+            </form>
+        </div>
+    </div>
+
+    {{ clusters_html | safe }}
+
+    {% if comp_total_pages > 1 %}
+    <nav class="d-flex justify-content-between align-items-center bg-white p-3 rounded-3 shadow-sm mt-3">
+        <small class="text-muted">
+            Página <b>{{ comp_page }}</b> de <b>{{ comp_total_pages }}</b> ({{ comp_filtered_total }} grupos de repetição)
+        </small>
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {{ 'disabled' if comp_page <= 1 else '' }}">
+                <a class="page-link" href="/?tab=comparador&selected_date={{ current_date }}&comp_days={{ scan_days }}&comp_store={{ comp_store }}&comp_search={{ comp_search }}&comp_page={{ comp_page - 1 }}">« Anterior</a>
+            </li>
+            <li class="page-item disabled">
+                <span class="page-link text-dark fw-bold">{{ comp_page }} / {{ comp_total_pages }}</span>
+            </li>
+            <li class="page-item {{ 'disabled' if comp_page >= comp_total_pages else '' }}">
+                <a class="page-link" href="/?tab=comparador&selected_date={{ current_date }}&comp_days={{ scan_days }}&comp_store={{ comp_store }}&comp_search={{ comp_search }}&comp_page={{ comp_page + 1 }}">Próxima »</a>
+            </li>
+        </ul>
+    </nav>
+    {% endif %}
+</div>

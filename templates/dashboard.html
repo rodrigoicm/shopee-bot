@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+    {{ alert_html | safe }}
+
+    <form id="quickBlockForm" action="/queue/block-term" method="POST" style="display:none;">
+        <input type="hidden" name="term" id="quickBlockTermInput">
+        <input type="hidden" name="offer_id" id="quickBlockOfferIdInput">
+        <input type="hidden" name="current_date" value="{{ current_date }}">
+        <input type="hidden" name="return_tab" id="quickBlockReturnTab" value="fila">
+        <input type="hidden" name="return_lab_sub" id="quickBlockReturnLab" value="shopee">
+    </form>
+
+    <div class="tab-content">
+        {% include "partials/tab_fila.html" %}
+        {% include "partials/tab_cadastrar.html" %}
+        {% include "partials/tab_laboratorio.html" %}
+        {% include "partials/tab_comparador.html" %}
+        {% include "partials/tab_vendas.html" %}
+        {% include "partials/tab_config.html" %}
+    </div>
+{% endblock %}

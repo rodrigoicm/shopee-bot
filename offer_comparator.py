@@ -244,7 +244,35 @@ def normalize_and_tokenize(title: str) -> tuple[str, list[str], set[str]]:
     no_accent = "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
 
     clean_str = re.sub(r"[^a-z0-9\s]", " ", no_accent)
-    raw_tokens = clean_str.split()
+    clean_str = re.sub(
+        r"\b\d+(?:ml|l|g|kg|w|v|cm|mm|m|gb|tb|pol|un|pcs|pecas|x)\b", " ", clean_str
+    )
+    extra_noise = {
+        "preto",
+        "preta",
+        "branco",
+        "branca",
+        "azul",
+        "rosa",
+        "vermelho",
+        "vermelha",
+        "cinza",
+        "bege",
+        "verde",
+        "amarelo",
+        "amarela",
+        "roxo",
+        "roxa",
+        "marrom",
+        "inox",
+        "dourado",
+        "prata",
+        "bivolt",
+        "110v",
+        "220v",
+        "127v",
+    }
+    raw_tokens = [t for t in clean_str.split() if t not in extra_noise]
 
     unique_ordered = []
     seen = set()
@@ -452,19 +480,28 @@ def is_product_recently_used_or_blocked(
 def analyze_repeated_offers(
     days: int = 14, threshold: float = 60.0, store_filter: str = "all"
 ) -> dict:
-    cutoff_date = (datetime.now(CUIABA_TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, store, product_url, formatted_message, media_url, status, priority, target_date, created_at
-        FROM queue
-        WHERE target_date >= ?
-        ORDER BY target_date DESC, id DESC
-        """,
-        (cutoff_date,),
-    )
+    if days and days > 0:
+        cutoff_date = (datetime.now(CUIABA_TZ) - timedelta(days=days)).strftime(
+            "%Y-%m-%d"
+        )
+        cursor.execute(
+            """
+            SELECT id, store, product_url, formatted_message, media_url, status, priority, target_date, created_at
+            FROM queue
+            WHERE target_date >= ?
+            ORDER BY target_date DESC, id DESC
+            """,
+            (cutoff_date,),
+        )
+    else:
+        cursor.execute("""
+            SELECT id, store, product_url, formatted_message, media_url, status, priority, target_date, created_at
+            FROM queue
+            ORDER BY target_date DESC, id DESC
+            """)
     rows = cursor.fetchall()
     conn.close()
 

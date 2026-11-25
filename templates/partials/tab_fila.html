@@ -1,0 +1,47 @@
+<div class="tab-pane fade {{ 'show active' if tab == 'fila' else '' }}" role="tabpanel">
+    <div class="d-flex flex-wrap gap-2 mb-3 align-items-center justify-content-between bg-white p-3 rounded-3 shadow-sm">
+        <div>
+            <h5 class="fw-bold mb-0">📋 Fila de Disparos ({{ current_date }})</h5>
+            <small class="text-muted">Use o botão <b>"🚫 Termo"</b> em qualquer oferta inútil (ex: almofada) para banir a palavra e limpar a fila.</small>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="/?tab=cadastrar&selected_date={{ current_date }}" class="btn btn-outline-dark fw-semibold">➕ Nova Manual</a>
+            <form action="/delete-pending" method="POST" class="m-0" onsubmit="return confirm('Tem certeza que deseja excluir TODAS as {{ pending_offers }} ofertas pendentes de {{ current_date }}?')">
+                <input type="hidden" name="target_date" value="{{ current_date }}">
+                <button type="submit" class="btn btn-outline-danger fw-semibold" {{ 'disabled' if pending_offers == 0 else '' }} title="Remove todas as ofertas com status Pendente desta data">
+                    🗑️ Limpar Pendentes ({{ pending_offers }})
+                </button>
+            </form>
+            <form action="/ai/regenerate-all-pending" method="POST" class="m-0">
+                <input type="hidden" name="target_date" value="{{ current_date }}">
+                <button type="submit" class="btn btn-info fw-bold text-dark" {{ 'disabled' if pending_offers == 0 else '' }}>
+                    ✨ Gerar IA nas Pendentes ({{ pending_offers }})
+                </button>
+            </form>
+            <form action="/generate-auto-offers" method="POST" class="m-0">
+                <input type="hidden" name="target_date" value="{{ current_date }}">
+                <button type="submit" class="btn btn-success fw-bold">
+                    🎲 Gerar {{ configs.get('auto_refill_count', '15') }} Automáticas ({{ mix_label if (ml_auto_enabled or amazon_enabled) else '100% Shopee' }})
+                </button>
+            </form>
+        </div>
+    </div>
+    <div class="card border-0 shadow-sm rounded-3 overflow-hidden">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>ID</th>
+                        <th>Produto</th>
+                        <th>Plataforma</th>
+                        <th>Categoria / Origem</th>
+                        <th>Modo</th>
+                        <th>Status</th>
+                        <th>Ações Rápidas</th>
+                    </tr>
+                </thead>
+                <tbody>{{ queue_rows_html | safe }}</tbody>
+            </table>
+        </div>
+    </div>
+</div>

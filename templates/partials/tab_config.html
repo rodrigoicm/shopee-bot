@@ -1,0 +1,287 @@
+<div class="tab-pane fade {{ 'show active' if tab == 'config' else '' }}" role="tabpanel">
+    <div class="card border-0 shadow-sm rounded-3">
+        <div class="card-header bg-white border-bottom pt-3 pb-0">
+            <ul class="nav nav-pills mb-3 gap-2 flex-wrap" role="tablist">
+                <li class="nav-item"><a class="nav-link fw-semibold {{ 'active' if cfg_sub == 'geral' else '' }}" href="/?tab=config&cfg_sub=geral&selected_date={{ current_date }}">⏰ 1. Geral & Mix</a></li>
+                <li class="nav-item"><a class="nav-link fw-semibold {{ 'active' if cfg_sub == 'shopee' else '' }}" href="/?tab=config&cfg_sub=shopee&selected_date={{ current_date }}">🟠 2. Shopee</a></li>
+                <li class="nav-item"><a class="nav-link fw-semibold {{ 'active' if cfg_sub == 'ml' else '' }}" href="/?tab=config&cfg_sub=ml&selected_date={{ current_date }}">🟡 3. Mercado Livre</a></li>
+                <li class="nav-item"><a class="nav-link fw-semibold {{ 'active' if cfg_sub == 'amazon' else '' }}" href="/?tab=config&cfg_sub=amazon&selected_date={{ current_date }}">🟠 4. Amazon</a></li>
+                <li class="nav-item"><a class="nav-link fw-semibold {{ 'active' if cfg_sub == 'ia' else '' }}" href="/?tab=config&cfg_sub=ia&selected_date={{ current_date }}">🤖 5. Copy com IA</a></li>
+                <li class="nav-item"><a class="nav-link fw-semibold {{ 'active' if cfg_sub == 'dedup' else '' }}" href="/?tab=config&cfg_sub=dedup&selected_date={{ current_date }}">🛡️ 6. Anti-Repetição</a></li>
+            </ul>
+        </div>
+        <div class="card-body p-4 tab-content">
+
+            <!-- 1. GERAL & MIX -->
+            <div class="tab-pane fade {{ 'show active' if cfg_sub == 'geral' else '' }}">
+                <form action="/update-config" method="POST" class="row g-3">
+                    <div class="col-md-12"><h6 class="fw-bold mb-2">⏰ Horários de Disparo & Janela Operacional</h6></div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold">Início</label>
+                        <input type="time" name="start_time" value="{{ configs.get('start_time', '08:00') }}" class="form-control" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold">Término</label>
+                        <input type="time" name="end_time" value="{{ configs.get('end_time', '22:00') }}" class="form-control" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold">Intervalo (min)</label>
+                        <input type="number" name="interval_minutes" value="{{ configs.get('interval_minutes', '30') }}" class="form-control" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold">Quantidade por Lote Automático</label>
+                        <input type="number" name="auto_refill_count" value="{{ configs.get('auto_refill_count', '15') }}" class="form-control" required>
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="auto_refill_enabled" value="1" id="autoRefillSwitch" {{ 'checked' if configs.get('auto_refill_enabled', '1') == '1' else '' }}>
+                            <label class="form-check-label fw-bold" for="autoRefillSwitch">🔄 Auto-Abastecer Fila quando zerar</label>
+                        </div>
+                    </div>
+
+                    <div class="col-md-12 mt-4">
+                        <h6 class="fw-bold mb-2">🎛️ Mix de Lojas na Geração Automática</h6>
+                        <div class="row g-2 p-3 bg-warning-subtle border border-warning rounded">
+                            <div class="col-md-3">
+                                <label class="small fw-bold">% Shopee</label>
+                                <input type="number" min="0" max="100" name="mix_shopee_pct" value="{{ mix_shopee_pct }}" class="form-control" required>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="small fw-bold">% Amazon</label>
+                                <input type="number" min="0" max="100" name="mix_amazon_pct" value="{{ mix_amazon_pct }}" class="form-control" required>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="small fw-bold">% ML (calc)</label>
+                                <input type="number" value="{{ mix_ml_pct }}" class="form-control" disabled>
+                            </div>
+                            <div class="col-md-3 d-flex align-items-end">
+                                <button type="button" class="btn btn-outline-dark w-100" onclick="restaurarMixPadrao()">🔄 Restaurar 40/40/20</button>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" name="ml_auto_enabled" value="1" id="mlAutoSwitch" {{ 'checked' if ml_auto_enabled else '' }}>
+                                    <label class="form-check-label fw-bold" for="mlAutoSwitch">🟡 Incluir Mercado Livre no mix</label>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" name="amazon_auto_enabled" value="1" id="amazonAutoSwitch" {{ 'checked' if amazon_enabled else '' }} {{ 'disabled' if not amazon_available else '' }}>
+                                    <label class="form-check-label fw-bold" for="amazonAutoSwitch">🟠 Incluir Amazon no mix {{ '(módulo amazon_auto.py não instalado)' if not amazon_available else '' }}</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-12 pt-2">
+                        <button type="submit" class="btn btn-primary fw-bold px-4">💾 Salvar Geral & Mix</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 2. SHOPEE -->
+            <div class="tab-pane fade {{ 'show active' if cfg_sub == 'shopee' else '' }}">
+                <form action="/update-shopee-config" method="POST" class="row g-3">
+                    <input type="hidden" name="selected_date" value="{{ current_date }}">
+                    <input type="hidden" name="return_tab" value="config">
+                    <div class="col-md-12"><h6 class="fw-bold mb-1">🟠 Configurações da Shopee</h6></div>
+                    <div class="col-md-4">
+                        <label class="small fw-bold">% Busca Geral (Top Ofertas)</label>
+                        <input type="number" min="0" max="100" name="shopee_general_pct" value="{{ shopee_gen_pct }}" class="form-control">
+                        <small class="text-muted">{{ shopee_cat_pct }}% virá das Categorias marcadas abaixo</small>
+                    </div>
+                    <div class="col-md-8">
+                        <label class="small fw-bold">Palavras-chave extras para Busca Geral (opcional)</label>
+                        <input type="text" name="auto_keywords" value="{{ configs.get('auto_keywords', '') }}" placeholder="Ex: air fryer, kit ferramentas, tênis corrida" class="form-control">
+                    </div>
+                    <div class="col-md-12">
+                        <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-2">
+                            <label class="small fw-bold text-success mb-0">
+                                ✅ Categorias Desejadas na Shopee ({{ available_shopee_cats_count }} disponíveis | Última sync: {{ shopee_cats_updated_at }}):
+                            </label>
+                            <button type="submit" formaction="/shopee/sync-categories" formmethod="POST" class="btn btn-sm btn-outline-danger fw-semibold">
+                                🔄 Buscar/Atualizar Categorias da Shopee
+                            </button>
+                        </div>
+                        <div class="row g-2 p-3 bg-light border rounded" style="max-height: 280px; overflow-y: auto;">
+                            {{ shopee_cat_checkboxes_html | safe }}
+                        </div>
+                        <input type="text" name="shopee_custom_categories" value="{{ shopee_custom_cats_str }}" placeholder="Outras categorias/nichos desejados (separados por vírgula)" class="form-control form-control-sm mt-2">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="small fw-bold text-danger">🚫 Termos Excluídos na Shopee (ex: almofada, capa, pelúcia):</label>
+                        <input type="text" name="shopee_blocked_terms" value="{{ shopee_blocked_terms_raw }}" placeholder="Ex: almofada, capa de almofada, chaveiro, adesivo" class="form-control">
+                    </div>
+                    <div class="col-md-12 pt-2">
+                        <button type="submit" class="btn fw-bold text-white px-4" style="background-color:#ee4d2d;">💾 Salvar Shopee</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 3. MERCADO LIVRE -->
+            <div class="tab-pane fade {{ 'show active' if cfg_sub == 'ml' else '' }}">
+                <form action="/update-ml-config" method="POST" class="row g-3">
+                    <input type="hidden" name="selected_date" value="{{ current_date }}">
+                    <input type="hidden" name="return_tab" value="config">
+                    <div class="col-md-12"><h6 class="fw-bold mb-1">🟡 Configurações do Mercado Livre (Coleta Anônima)</h6></div>
+                    <div class="col-md-3">
+                        <label class="small fw-bold">% Mais Vendidos</label>
+                        <input type="number" min="0" max="100" name="ml_best_sellers_pct" value="{{ ml_best_pct }}" class="form-control">
+                        <small class="text-muted">{{ ml_offers_pct }}% Ofertas</small>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="small fw-bold">Histórico Anti-Repetição (dias)</label>
+                        <input type="number" min="1" max="60" name="ml_history_days" value="{{ ml_hist_days }}" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small fw-bold">Preço Mín. (R$)</label>
+                        <input type="number" min="0" step="1" name="ml_min_price" value="{{ ml_min_price }}" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small fw-bold">Preço Máx. (R$)</label>
+                        <input type="number" min="0" step="1" name="ml_max_price" value="{{ ml_max_price }}" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small fw-bold">Desc. Mín. (%)</label>
+                        <input type="number" min="0" max="90" name="ml_min_discount" value="{{ ml_min_discount }}" class="form-control">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="small fw-bold">Páginas Sorteadas por Busca (por URL)</label>
+                        <input type="number" min="1" max="30" name="ml_pages_per_run" value="{{ ml_pages_per_run }}" class="form-control">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="small fw-bold">Alcance Máximo de Páginas (Pool)</label>
+                        <input type="number" min="1" max="50" name="ml_max_page_pool" value="{{ ml_max_page_pool }}" class="form-control">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="small fw-bold">URL Mais Vendidos ML</label>
+                        <input type="url" name="ml_bestsellers_url" value="{{ ml_bestsellers_url }}" class="form-control">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="small fw-bold">URL(s) de Ofertas ML (1 por linha ou separadas por vírgula)</label>
+                        <textarea name="ml_offers_url" rows="2" class="form-control font-monospace small">{{ ml_offers_url }}</textarea>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                            <div>
+                                <label class="small fw-bold text-success mb-0">
+                                    ✅ Categorias & Subcategorias Desejadas no ML ({{ available_ml_cats_count }} disponíveis | Última sync: {{ ml_cats_updated_at }}):
+                                </label>
+                                <div class="text-muted" style="font-size:0.75rem;">Marcar a categoria seleciona todas as subcategorias automaticamente. Clique em <b>▾ Subcategorias</b> para ajustar individualmente.</div>
+                            </div>
+                            <button type="submit" formaction="/ml/sync-categories" formmethod="POST" class="btn btn-sm btn-outline-warning text-dark fw-semibold">
+                                🔄 Buscar/Atualizar Categorias do ML
+                            </button>
+                        </div>
+                        <div class="row g-2 p-2 bg-light border rounded" style="max-height: 420px; overflow-y: auto;">
+                            {{ ml_cat_tree_html | safe }}
+                        </div>
+                        <input type="text" name="custom_ml_categories" value="{{ custom_ml_cats_str }}" placeholder="Outras categorias desejadas (separadas por ponto e vírgula ;)" class="form-control form-control-sm mt-2">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="small fw-bold">🚫 Termos excluídos em Ofertas ML</label>
+                        <input type="text" name="ml_excluded_categories_offers" value="{{ excl_offers_raw }}" placeholder="Ex: gift card, digital" class="form-control">
+                    </div>
+                    <div class="col-md-12 pt-2">
+                        <button type="submit" class="btn btn-warning fw-bold px-4">💾 Salvar Mercado Livre</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 4. AMAZON -->
+            <div class="tab-pane fade {{ 'show active' if cfg_sub == 'amazon' else '' }}">
+                <form action="/update-amazon-config" method="POST" class="row g-3">
+                    <div class="col-md-12"><h6 class="fw-bold mb-1">🟠 Configurações da Amazon</h6></div>
+                    <div class="col-md-4">
+                        <label class="small fw-bold">% Deals dentro da Amazon</label>
+                        <input type="number" min="0" max="100" name="amazon_bestsellers_pct" value="{{ amazon_deals_pct }}" class="form-control">
+                        <small class="text-muted">{{ amazon_bestsellers_pct }}% Bestsellers</small>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="small fw-bold">Histórico (dias)</label>
+                        <input type="number" name="amazon_history_days" value="{{ amazon_hist_days }}" class="form-control">
+                    </div>
+                    <div class="col-md-4"></div>
+                    <div class="col-md-6">
+                        <label class="small fw-bold">URL Bestsellers</label>
+                        <input type="url" name="amazon_bestsellers_url" value="{{ amazon_bestsellers_url }}" class="form-control">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="small fw-bold">URL Deals</label>
+                        <input type="url" name="amazon_deals_url" value="{{ amazon_deals_url }}" class="form-control">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="small fw-bold text-success">✅ Categorias Amazon:</label>
+                        <div class="row g-2 p-3 bg-light border rounded">
+                            {{ amazon_cat_config_html | safe if amazon_cat_config_html else '<span class="text-muted small">Módulo não instalado</span>' | safe }}
+                        </div>
+                        <input type="text" name="custom_categories" value="{{ amazon_cat_extra_str }}" placeholder="Categorias extras (vírgula)" class="form-control form-control-sm mt-2">
+                    </div>
+                    <div class="col-md-12 pt-2">
+                        <button type="submit" class="btn btn-dark fw-bold px-4">💾 Salvar Amazon</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 5. IA (COM SELETOR DE MODELOS GEMINI) -->
+            <div class="tab-pane fade {{ 'show active' if cfg_sub == 'ia' else '' }}">
+                <h6 class="fw-bold mb-3">🤖 Copywriting com IA (Google Gemini)</h6>
+                <form action="/update-ai-config" method="POST" class="row g-3">
+                    <div class="col-md-12">
+                        <div class="form-check form-switch p-3 bg-info-subtle border border-info rounded">
+                            <input class="form-check-input ms-0 me-2" type="checkbox" name="ai_copy_enabled" value="1" id="aiCopySwitch" {{ 'checked' if ai_enabled else '' }}>
+                            <label class="form-check-label fw-bold" for="aiCopySwitch">✨ Ativar gancho automático com IA nas novas ofertas</label>
+                        </div>
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label small fw-bold">Modelo Gemini Ativo (Último teste: {{ ai_models_updated_at }})</label>
+                        <select name="ai_copy_model" class="form-select">
+                            {{ ai_model_options_html | safe }}
+                        </select>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <button type="submit" formaction="/ai/sync-models" formmethod="POST" class="btn btn-outline-dark w-100 fw-semibold">
+                            🔄 Testar e Atualizar Modelos
+                        </button>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold">Estilo</label>
+                        <select name="ai_copy_style" class="form-select">
+                            <option value="urgencia_comparativo" {{ 'selected' if ai_style == 'urgencia_comparativo' else '' }}>🚨 Urgência + Comparativo</option>
+                            <option value="calculo_unitario" {{ 'selected' if ai_style == 'calculo_unitario' else '' }}>🧮 Preço por Unidade (Kits)</option>
+                            <option value="achadinho_amigavel" {{ 'selected' if ai_style == 'achadinho_amigavel' else '' }}>😍 Achadinho VIP</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold">Instrução customizada</label>
+                        <input type="text" name="ai_copy_custom_prompt" value="{{ ai_custom_prompt }}" class="form-control">
+                    </div>
+                    <div class="col-md-12 pt-2">
+                        <button type="submit" class="btn btn-info fw-bold px-4">💾 Salvar IA</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 6. DEDUP -->
+            <div class="tab-pane fade {{ 'show active' if cfg_sub == 'dedup' else '' }}">
+                <h6 class="fw-bold mb-3">🛡️ Anti-Repetição & Blacklist Global</h6>
+                <form action="/comparator/update-settings" method="POST" class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold">Janela Histórica (dias)</label>
+                        <input type="number" min="1" max="60" name="dedup_history_days" value="{{ dedup_days_cfg }}" class="form-control" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold">Similaridade mínima (%)</label>
+                        <input type="number" min="35" max="95" name="dedup_similarity_threshold" value="{{ dedup_thresh_cfg | int }}" class="form-control" required>
+                    </div>
+                    <div class="col-md-12">
+                        <label class="form-label small fw-bold">🚫 Termos bloqueados em Todas as Lojas (vírgula)</label>
+                        <textarea name="dedup_blocked_terms" rows="3" class="form-control">{{ blocked_terms_cfg }}</textarea>
+                    </div>
+                    <div class="col-md-12 pt-2">
+                        <button type="submit" class="btn btn-dark fw-bold px-4">💾 Salvar Anti-Repetição</button>
+                    </div>
+                </form>
+            </div>
+
+        </div>
+    </div>
+</div>

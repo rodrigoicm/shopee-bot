@@ -1,0 +1,56 @@
+<div class="tab-pane fade {{ 'show active' if tab == 'cadastrar' else '' }}" role="tabpanel">
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm rounded-3">
+                <div class="card-header bg-dark text-white fw-bold py-3">➕ Cadastrar Nova Oferta Manual (Shopee, Amazon ou ML)</div>
+                <div class="card-body p-4">
+                    <form action="/add-offer" method="POST" class="row g-3">
+                        <input type="hidden" name="target_date" value="{{ current_date }}">
+                        <div class="col-md-12">
+                            <label class="form-label fw-bold small">1. Link do Produto ou Página de Cupom</label>
+                            <input type="url" name="product_url" id="productUrlInput" placeholder="https://s.shopee.com.br/... | https://amzn.to/... | https://mercadolivre.com/..." class="form-control" required>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label fw-bold small">2. Vídeo do Produto (.mp4) — Opcional</label>
+                            <input type="url" name="manual_video_url" id="manualVideoInput" placeholder="Cole o link direto https://down-ws-br.vod.susercontent.com/...mp4" class="form-control">
+                            <div class="form-check mt-2">
+                                <input class="form-check-input" type="checkbox" name="extract_video" value="1" id="extractVideoCheck">
+                                <label class="form-check-label small fw-semibold" for="extractVideoCheck">🎬 Tentar extrair vídeo (.mp4) automaticamente via Browser (Shopee)</label>
+                            </div>
+                        </div>
+                        <div class="col-md-12" id="videoValidationBox" style="display: none;">
+                            <div class="p-3 border rounded bg-light">
+                                <div id="videoValidationStatus" class="mb-2 fw-bold"></div>
+                                <video id="videoPreviewPlayer" class="rounded" style="max-height: 240px; display: none;" controls></video>
+                            </div>
+                        </div>
+                        <div class="col-md-12 d-flex gap-2 pt-2">
+                            <button type="button" class="btn btn-outline-secondary fw-semibold" onclick="validateShopeeVideo()">🔍 Testar Vídeo</button>
+                            <button type="submit" class="btn btn-primary flex-grow-1 fw-bold">🚀 Converter Link e Salvar na Fila ({{ current_date }})</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm rounded-3">
+                <div class="card-header bg-secondary text-white fw-bold py-3">📥 Reaproveitar / Importar Oferta</div>
+                <div class="card-body p-4">
+                    <p class="small text-muted">Selecione um produto de dias anteriores para revalidar preço e adicionar em <b>{{ current_date }}</b>:</p>
+                    <form action="/import-offer" method="POST" class="row g-3">
+                        <input type="hidden" name="target_date" value="{{ current_date }}">
+                        <div class="col-md-12">
+                            <select name="product_url" class="form-select" required>
+                                <option value="">Selecione...</option>
+                                {{ import_options_html | safe }}
+                            </select>
+                        </div>
+                        <div class="col-md-12">
+                            <button type="submit" class="btn btn-warning w-100 fw-bold">📥 Importar para {{ current_date }}</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PromoCuiabá — Plataforma de Automação de Ofertas</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/css/portal.css" rel="stylesheet">
+</head>
+<body>
+    <div class="app-wrapper">
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fs-4">🚀</span>
+                    <div>
+                        <div class="fw-bold fs-5 lh-1 text-white">PromoCuiabá</div>
+                        <small class="text-secondary" style="font-size: 0.75rem;">SaaS Affiliate Hub</small>
+                    </div>
+                </div>
+            </div>
+            <div class="sidebar-nav">
+                <div class="sidebar-section-title">Operação Diária</div>
+                <a class="sidebar-link {{ 'active' if tab == 'fila' else '' }}" href="/?tab=fila&selected_date={{ current_date }}">
+                    <span>📋 Fila de Disparos</span>
+                    <span class="badge rounded-pill bg-light text-dark">{{ pending_offers }}</span>
+                </a>
+                <a class="sidebar-link {{ 'active' if tab == 'cadastrar' else '' }}" href="/?tab=cadastrar&selected_date={{ current_date }}">
+                    <span>➕ Cadastrar / Importar</span>
+                </a>
+
+                <div class="sidebar-section-title mt-2">Curadoria & Automação</div>
+                <a class="sidebar-link {{ 'active' if tab == 'laboratorio' else '' }}" href="/?tab=laboratorio&lab_sub={{ lab_sub }}&selected_date={{ current_date }}">
+                    <span>🧪 Laboratório</span>
+                    <span class="badge bg-warning text-dark">Ativo</span>
+                </a>
+                <a class="sidebar-link {{ 'active' if tab == 'comparador' else '' }}" href="/?tab=comparador&selected_date={{ current_date }}&comp_days={{ scan_days }}&comp_store={{ comp_store }}">
+                    <span>🛡️ Anti-Repetição</span>
+                    <span class="badge rounded-pill bg-danger">{{ comp_report.total_clusters }}</span>
+                </a>
+
+                <div class="sidebar-section-title mt-2">Gestão & Sistema</div>
+                <a class="sidebar-link {{ 'active' if tab == 'vendas' else '' }}" href="/?tab=vendas&selected_date={{ current_date }}&sales_days={{ sales_days }}&sales_platform={{ sales_platform }}&sales_status={{ sales_status }}">
+                    <span>💰 Vendas & Comissões</span>
+                </a>
+                <a class="sidebar-link {{ 'active' if tab == 'config' else '' }}" href="/?tab=config&cfg_sub={{ cfg_sub }}&selected_date={{ current_date }}">
+                    <span>⚙️ Configurações</span>
+                </a>
+            </div>
+            <div class="p-3 border-top border-secondary border-opacity-25 small">
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary">Copywriting IA:</span>
+                    <span class="badge {{ 'bg-info text-dark' if ai_enabled else 'bg-secondary' }}">{{ 'ATIVO ✨' if ai_enabled else 'OFF' }}</span>
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                    <span class="text-secondary">Mix Automático:</span>
+                    <span class="badge {{ 'bg-warning text-dark' if (ml_auto_enabled or amazon_enabled) else 'bg-secondary' }}">{{ mix_label if (ml_auto_enabled or amazon_enabled) else '100% Shopee' }}</span>
+                </div>
+            </div>
+        </aside>
+
+        <div class="main-area">
+            <header class="topbar d-flex flex-wrap justify-content-between align-items-center gap-3 shadow-sm">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="fw-bold text-secondary small text-uppercase">📅 Data da Fila:</span>
+                    <form method="GET" action="/" class="d-flex align-items-center gap-2 m-0">
+                        <input type="hidden" name="tab" value="{{ tab }}">
+                        <input type="hidden" name="lab_sub" value="{{ lab_sub }}">
+                        <input type="hidden" name="cfg_sub" value="{{ cfg_sub }}">
+                        <input type="date" name="selected_date" value="{{ current_date }}" class="form-control form-control-sm fw-semibold" onchange="this.form.submit()">
+                        <a href="/?tab={{ tab }}&lab_sub={{ lab_sub }}&cfg_sub={{ cfg_sub }}&selected_date={{ today_str }}" class="btn btn-sm btn-outline-dark">Hoje</a>
+                    </form>
+                </div>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">📋 Total: {{ total_offers }}</span>
+                    <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">✅ Enviadas: {{ sent_offers }}</span>
+                    <span class="badge bg-warning-subtle text-dark border border-warning px-3 py-2">⏳ Pendentes: {{ pending_offers }}</span>
+                    <div class="bg-dark text-white rounded-3 px-3 py-1 d-flex align-items-center gap-2">
+                        <span>⏱️ <strong id="countdown-timer" class="text-info" data-seconds="{{ remaining_seconds }}">--:--</strong></span>
+                        <small class="text-light opacity-75">({{ timer_status_text }})</small>
+                    </div>
+                </div>
+            </header>
+
+            <main class="container-fluid p-4">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/portal.js"></script>
+</body>
+</html>

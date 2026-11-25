@@ -1,0 +1,134 @@
+<div class="tab-pane fade {{ 'show active' if tab == 'laboratorio' else '' }}" role="tabpanel">
+    <div class="card mb-3 border-0 shadow-sm rounded-3">
+        <div class="card-header bg-white border-bottom pt-3 pb-0">
+            <ul class="nav nav-pills mb-3 gap-2" role="tablist">
+                <li class="nav-item">
+                    <a class="nav-link fw-semibold {{ 'active' if lab_sub == 'shopee' else '' }}" href="/?tab=laboratorio&lab_sub=shopee&selected_date={{ current_date }}">🟠 Shopee</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link fw-semibold {{ 'active' if lab_sub == 'amazon' else '' }}" href="/?tab=laboratorio&lab_sub=amazon&selected_date={{ current_date }}">🟠 Amazon</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link fw-semibold {{ 'active' if lab_sub == 'ml' else '' }}" href="/?tab=laboratorio&lab_sub=ml&selected_date={{ current_date }}">🟡 Mercado Livre</a>
+                </li>
+            </ul>
+        </div>
+        <div class="card-body tab-content">
+
+            <!-- SHOPEE LAB -->
+            <div class="tab-pane fade {{ 'show active' if lab_sub == 'shopee' else '' }}">
+                <div class="card mb-3 border-0 shadow-sm rounded-3">
+                    <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
+                        <div>
+                            <h5 class="fw-bold mb-1">🧪 Laboratório de Curadoria — Shopee</h5>
+                            <div class="small text-muted">
+                                Mix Shopee: <b>{{ shopee_cat_pct }}% Categorias</b> + <b>{{ shopee_gen_pct }}% Geral</b> |
+                                Categorias: <b>{{ available_shopee_cats_count }}</b> (Sync: {{ shopee_cats_updated_at }}) |
+                                Termos bloqueados: <code>{{ shopee_blocked_terms_raw or blocked_terms_cfg or 'Nenhum' }}</code>
+                            </div>
+                        </div>
+                        <form action="/shopee/sync-categories" method="POST" class="m-0">
+                            <input type="hidden" name="selected_date" value="{{ current_date }}">
+                            <input type="hidden" name="return_tab" value="laboratorio">
+                            <button type="submit" class="btn btn-sm btn-outline-danger fw-semibold">
+                                🔄 Buscar/Atualizar Categorias da Shopee
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                <form action="/shopee-lab/simulate" method="POST" class="row g-2 mb-3 p-3 bg-white rounded-3 shadow-sm">
+                    <input type="hidden" name="selected_date" value="{{ current_date }}">
+                    <div class="col-md-2">
+                        <label class="small fw-bold">Qtd.</label>
+                        <input type="number" name="sim_count" value="10" min="2" max="30" class="form-control form-control-sm">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="small fw-bold">Categorias Desejadas (marque para filtrar e salvar)</label>
+                        <div class="row g-1 p-2 bg-light border rounded" style="max-height: 150px; overflow-y: auto;">
+                            {{ shopee_cat_lab_html | safe }}
+                        </div>
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button type="submit" class="btn fw-bold w-100 text-white" style="background-color:#ee4d2d;">🔍 Simular Shopee</button>
+                    </div>
+                </form>
+                {{ shopee_lab_results_html | safe }}
+            </div>
+
+            <!-- AMAZON LAB -->
+            <div class="tab-pane fade {{ 'show active' if lab_sub == 'amazon' else '' }}">
+                <div class="card mb-3 border-0 shadow-sm rounded-3">
+                    <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
+                        <div>
+                            <h5 class="fw-bold mb-1">🧪 Laboratório de Curadoria — Amazon</h5>
+                            <div class="small text-muted">
+                                Fontes: <b>{{ amazon_deals_pct }}% Deals</b> + <b>{{ amazon_bestsellers_pct }}% Bestsellers</b> |
+                                Anti-repetição: <b>{{ amazon_hist_days }} dias</b> |
+                                Termos bloqueados: <code>{{ blocked_terms_cfg or 'Nenhum' }}</code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <form action="/amazon-lab/simulate" method="POST" class="row g-2 mb-3 p-3 bg-white rounded-3 shadow-sm">
+                    <input type="hidden" name="selected_date" value="{{ current_date }}">
+                    <div class="col-md-2">
+                        <label class="small fw-bold">Qtd.</label>
+                        <input type="number" name="sim_count" value="10" min="2" max="30" class="form-control form-control-sm">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="small fw-bold">Categorias</label>
+                        <div class="row g-1 p-2 bg-light border rounded" style="max-height: 130px; overflow-y: auto;">
+                            {{ amazon_cat_lab_html | safe if amazon_cat_lab_html else '<span class="text-muted small">Nenhuma categoria configurada.</span>' | safe }}
+                        </div>
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button type="submit" class="btn btn-warning fw-bold w-100" {{ 'disabled' if not amazon_available else '' }}>🔍 Simular Amazon</button>
+                    </div>
+                </form>
+                {{ amazon_lab_results_html | safe }}
+            </div>
+
+            <!-- ML LAB -->
+            <div class="tab-pane fade {{ 'show active' if lab_sub == 'ml' else '' }}">
+                <div class="card mb-3 border-0 shadow-sm rounded-3">
+                    <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
+                        <div>
+                            <h5 class="fw-bold mb-1">🧪 Laboratório de Curadoria — Mercado Livre</h5>
+                            <div class="small text-muted">
+                                Mix ML: <b>{{ ml_best_pct }}% Mais Vendidos</b> + <b>{{ ml_offers_pct }}% Ofertas</b> |
+                                Categorias: <b>{{ available_ml_cats_count }}</b> (Sync: {{ ml_cats_updated_at }}) |
+                                Faixa: R$ {{ ml_min_price }}–R$ {{ ml_max_price }} |
+                                Termos bloqueados: <code>{{ blocked_terms_cfg or 'Nenhum' }}</code>
+                            </div>
+                        </div>
+                        <form action="/ml/sync-categories" method="POST" class="m-0">
+                            <input type="hidden" name="selected_date" value="{{ current_date }}">
+                            <input type="hidden" name="return_tab" value="laboratorio">
+                            <button type="submit" class="btn btn-sm btn-outline-warning text-dark fw-semibold">
+                                🔄 Buscar/Atualizar Categorias do ML
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                <form action="/ml-lab/simulate" method="POST" class="row g-2 mb-3 p-3 bg-white rounded-3 shadow-sm">
+                    <input type="hidden" name="selected_date" value="{{ current_date }}">
+                    <div class="col-md-2">
+                        <label class="small fw-bold">Qtd.</label>
+                        <input type="number" name="sim_count" value="10" min="2" max="30" class="form-control form-control-sm">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="small fw-bold">Categorias Desejadas no ML (marque para filtrar e salvar)</label>
+                        <div class="row g-1 p-2 bg-light border rounded" style="max-height: 150px; overflow-y: auto;">
+                            {{ ml_cat_lab_html | safe }}
+                        </div>
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button type="submit" class="btn btn-warning fw-bold w-100">🔍 Simular ML</button>
+                    </div>
+                </form>
+                {{ ml_lab_results_html | safe }}
+            </div>
+
+        </div>
+    </div>
+</div>

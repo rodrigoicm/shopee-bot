@@ -1,71 +1,23 @@
-"""
-Serviço de Copywriting Inteligente via IA (Google Gemini Flash API) e Limpeza de Títulos.
-Gera chamadas curtas de 1 linha (máx 85 chars) sem repetir o preço que já vai abaixo,
-e limpa palavras de spam/tradução automática dos títulos dos produtos.
-"""
-
-import html
+import json
 import logging
 import os
-import re
-import socket
 import sqlite3
-from contextlib import contextmanager
+import time
+import re
+from datetime import datetime, timedelta, timezone
+
 import requests
 from dotenv import load_dotenv
-from database import DB_NAME, get_config
+
+from database import DB_NAME, get_config, update_config
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+CUIABA_TZ = timezone(timedelta(hours=-4))
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-_CACHED_MODELS_LIST: list[str] | None = None
-_LAST_WORKING_MODEL: str | None = None
-
-# Termos de spam de vendedores (especialmente Shopee internacional) para remover do título
-JUNK_TITLE_PATTERNS = [
-    r"\b202[2-7]\b",
-    r"\b(?:inverno\s+quente|quente\s+novo|novo\s+quente|anti-susto)\b",
-    r"\b(?:envio\s+imediato|pronta\s+entrega|envio\s+full|envio\s+r[aá]pido|envio\s+brasil)\b",
-    r"\b(?:promo[cç][aã]o|oferta\s+rel[aâ]mpago|queima\s+de\s+estoque|super\s+oferta|lan[cç]amento)\b",
-    r"【[^】]*】",
-    r"\[[^\]]*\]",
-]
-
-
-def clean_product_title(raw_title: str, max_len: int = 78) -> str:
-    """
-    Remove termos de spam/SEO ('2025 Inverno Quente Novo anti-Susto', 'Envio Imediato', etc.)
-    e corta o título de forma elegante em até `max_len` caracteres.
-    """
-    if not raw_title:
-        return "Produto em Oferta"
-
-    text = html.unescape(str(raw_title))
-    for pat in JUNK_TITLE_PATTERNS:
-        text = re.sub(pat, " ", text, flags=re.IGNORECASE)
-
-    # Remove barras/traços soltos no início ou fim e espaços duplicados
-    text = re.sub(r"\s+", " ", text).strip(" -–|/.,;:")
-
-    if len(text) > max_len:
-        text = text[:max_len].rsplit(" ", 1)[0].rstrip(" -–|/.,;:") + "..."
-
-    return text or "Produto em Oferta"
-
-
-@contextmanager
-def _force_ipv4_context():
-    orig_getaddrinfo = socket.getaddrinfo
-
-    def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
-        return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-    socket.getaddrinfo = _ipv4_only
-    try:
-        yield
-    finally:
-        socket.getaddrinfo = orig_getaddrinfo
+DEFAULT_FALLBACK_MODELS = []
 
 
 def ensure_ai_configs() -> None:
@@ -75,6 +27,9 @@ def ensure_ai_configs() -> None:
         "ai_copy_enabled": "0",
         "ai_copy_style": "urgencia_comparativo",
         "ai_copy_custom_prompt": "",
+        "ai_copy_model": "gemini-2.5-flash",
+        "ai_available_models_json": "[]",
+        "ai_models_updated_at": "Ainda não testado",
     }
     for k, v in defaults.items():
         cursor.execute(
@@ -87,239 +42,297 @@ def ensure_ai_configs() -> None:
 ensure_ai_configs()
 
 
-def _get_ordered_flash_models(api_key: str) -> list[str]:
-    global _CACHED_MODELS_LIST, _LAST_WORKING_MODEL
-    env_model = os.environ.get("GEMINI_MODEL", "").strip()
-    if env_model:
-        return [env_model.replace("models/", "")]
-
-    if _CACHED_MODELS_LIST:
-        if _LAST_WORKING_MODEL and _LAST_WORKING_MODEL in _CACHED_MODELS_LIST:
-            return [_LAST_WORKING_MODEL] + [
-                m for m in _CACHED_MODELS_LIST if m != _LAST_WORKING_MODEL
-            ]
-        return _CACHED_MODELS_LIST
-
-    preferred_priority = [
-        "gemini-2.5-flash",
-        "gemini-flash-latest",
-        "gemini-2.5-flash-lite",
-        "gemini-flash-lite-latest",
-        "gemini-2.0-flash",
-    ]
-
-    url = "https://generativelanguage.googleapis.com/v1beta/models"
-    headers = {"x-goog-api-key": api_key, "Connection": "close"}
-
+def get_cached_gemini_models() -> list[dict]:
     try:
-        with _force_ipv4_context():
-            resp = requests.get(url, headers=headers, timeout=8)
-        if resp.status_code == 200:
-            models_data = resp.json().get("models") or []
-            available = set()
-            for m in models_data:
-                name = (m.get("name") or "").replace("models/", "")
-                if "generateContent" in (m.get("supportedGenerationMethods") or []):
-                    if (
-                        "flash" in name.lower()
-                        and "tts" not in name.lower()
-                        and "image" not in name.lower()
-                    ):
-                        available.add(name)
-            final_list = [p for p in preferred_priority if p in available]
-            for other in sorted(available):
-                if other not in final_list:
-                    final_list.append(other)
-            if final_list:
-                _CACHED_MODELS_LIST = final_list[:6]
-                return _CACHED_MODELS_LIST
+        raw = get_config("ai_available_models_json") or "[]"
+        data = json.loads(raw)
+        if isinstance(data, list) and data:
+            return data
     except Exception:
         pass
-
-    return preferred_priority[:5]
-
-
-def _detect_multi_kit_title(title: str) -> list[int]:
-    if not title:
-        return []
-    m = re.search(
-        r"\b(?:kit|pack|combo|com|leve)?\s*(\d{1,3}(?:\s*[/|-]\s*\d{1,3})+|\d{1,3}\s+ou\s+\d{1,3})\b",
-        title,
-        re.IGNORECASE,
-    )
-    if not m:
-        return []
-    nums = [int(n) for n in re.findall(r"\d+", m.group(1)) if 1 <= int(n) <= 500]
-    return sorted(set(nums)) if len(nums) >= 2 else []
-
-
-def _calculate_exact_unit_price_in_python(
-    title: str, price: float | None
-) -> tuple[int | None, str | None]:
-    """
-    Calcula o preço por unidade no Python com precisão matemática exata
-    para impedir que a IA erre contas de divisão de cabeça (ex: Kit 12 por R$ 79,99 = R$ 6,67/un).
-    """
-    if not title or not price or price <= 0:
-        return None, None
-
-    # Se tiver múltiplos kits no título (ex: Kit 5/10), não calcula valor único
-    if _detect_multi_kit_title(title):
-        return None, None
-
-    patterns = [
-        r"\b(?:kit|pack|caixa|cx|combo|fardo|leve|pague)\s*(?:com\s*|c/\s*)?(\d{1,4})\b",
-        r"\b(\d{1,4})\s*(?:unidades|unidade|unid\.?|un\.?|peças|pecas|pares|fraldas|tiras|cápsulas|capsulas|sachês|saches|latas|garrafas|pacotes|rolos|folhas)\b",
+    return [
+        {"id": m, "status": "unknown", "label": f"{m} (não testado)"}
+        for m in DEFAULT_FALLBACK_MODELS
     ]
-    for pat in patterns:
-        m = re.search(pat, title, re.IGNORECASE)
-        if m:
-            qty = int(m.group(1))
-            # Evita confundir ml/gramas/voltagem (ex: 250ml, 110v) com quantidade de itens
-            if 2 <= qty <= 600:
-                unit_val = float(price) / qty
-                if unit_val >= 0.05:
-                    return qty, f"R$ {unit_val:.2f}".replace(".", ",")
-    return None, None
+
+
+def _ping_gemini_model(api_key: str, model_id: str) -> tuple[str, str]:
+    """Faz um ping mínimo no modelo para confirmar se está respondendo 200 OK."""
+    url = f"{GEMINI_BASE_URL}/models/{model_id}:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": "Responda apenas OK"}]}],
+        "generationConfig": {"maxOutputTokens": 5, "temperature": 0.0},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=12)
+        if resp.status_code == 200:
+            return "ok", "✅ Funcionando"
+        if resp.status_code == 429:
+            return "rate_limit", "⏳ Cota/Rate Limit (429)"
+        if resp.status_code == 404:
+            return "not_found", "❌ Indisponível (404)"
+        return "error", f"❌ Erro HTTP {resp.status_code}"
+    except Exception as e:
+        return "error", f"❌ Falha: {str(e)[:40]}"
+
+
+def discover_and_test_gemini_models() -> dict:
+    """
+    Lista os modelos disponíveis na API do Gemini, testa os principais candidatos,
+    salva o resultado no banco e seleciona automaticamente um modelo funcional.
+    """
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return {
+            "ok": False,
+            "error": "GEMINI_API_KEY não configurada no .env",
+            "models": [],
+        }
+
+    candidate_ids: list[str] = []
+    ignore_tokens = (
+        "embedding",
+        "aqa",
+        "imagen",
+        "veo",
+        "tts",
+        "audio",
+        "robotics",
+        "computer-use",
+        "deep-research",
+        "vision",
+    )
+
+    try:
+        resp = requests.get(f"{GEMINI_BASE_URL}/models?key={api_key}", timeout=15)
+        if resp.status_code == 200:
+            for m in resp.json().get("models") or []:
+                methods = m.get("supportedGenerationMethods") or []
+                if "generateContent" not in methods:
+                    continue
+                name = str(m.get("name") or "").replace("models/", "").strip()
+                low = name.lower()
+                if not low.startswith("gemini"):
+                    continue
+                if any(tok in low for tok in ignore_tokens):
+                    continue
+                candidate_ids.append(name)
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao listar modelos Gemini: {e}")
+
+    if not candidate_ids:
+        candidate_ids = list(DEFAULT_FALLBACK_MODELS)
+
+    # Prioriza modelos flash/lite (mais rápidos e maior cota gratuita)
+    def _sort_key(mid: str):
+        low = mid.lower()
+        is_flash = 0 if "flash" in low else 1
+        is_exp = 1 if ("exp" in low or "preview" in low) else 0
+        return (is_flash, is_exp, low)
+
+    candidate_ids = sorted(set(candidate_ids), key=_sort_key)[:10]
+
+    tested: list[dict] = []
+    working_ids: list[str] = []
+    for mid in candidate_ids:
+        status, status_text = _ping_gemini_model(api_key, mid)
+        tested.append(
+            {
+                "id": mid,
+                "status": status,
+                "label": f"{mid} — {status_text}",
+            }
+        )
+        if status == "ok":
+            working_ids.append(mid)
+        time.sleep(0.35)
+
+    update_config("ai_available_models_json", json.dumps(tested, ensure_ascii=False))
+    update_config(
+        "ai_models_updated_at", datetime.now(CUIABA_TZ).strftime("%d/%m/%Y %H:%M")
+    )
+
+    current_model = (get_config("ai_copy_model") or "").strip()
+    selected_model = current_model
+
+    # Se o modelo atual não está funcionando, troca automaticamente pelo 1º funcional
+    if working_ids and current_model not in working_ids:
+        selected_model = working_ids[0]
+        update_config("ai_copy_model", selected_model)
+
+    return {
+        "ok": len(working_ids) > 0,
+        "working_count": len(working_ids),
+        "total_tested": len(tested),
+        "selected_model": selected_model,
+        "models": tested,
+    }
+
+
+def _call_gemini_text(
+    api_key: str, model_id: str, prompt: str
+) -> tuple[str | None, int]:
+    url = f"{GEMINI_BASE_URL}/models/{model_id}:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 90},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=25)
+        if resp.status_code != 200:
+            logger.warning(
+                f"⚠️ Gemini [{model_id}] retornou HTTP {resp.status_code}: {resp.text[:180]}"
+            )
+            return None, resp.status_code
+        data = resp.json()
+        parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get(
+            "parts"
+        ) or []
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text or None, 200
+    except Exception as e:
+        logger.warning(f"⚠️ Erro na chamada Gemini [{model_id}]: {e}")
+        return None, 0
 
 
 def generate_ai_hook(
     title: str,
-    current_price: float | str | None,
-    original_price: float | str | None = None,
-    discount_pct: int | str | None = None,
+    current_price: float | None = None,
+    original_price: float | None = None,
+    discount_pct: str | int | None = None,
     store: str = "Shopee",
-    sales: int | str | None = None,
     force: bool = False,
-    max_price: float | str | None = None,
+    max_price: float | None = None,
     is_starting_price: bool = False,
 ) -> str:
-    global _LAST_WORKING_MODEL
-
     if not force and get_config("ai_copy_enabled") != "1":
         return ""
 
-    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip().strip("'\"")
-    if not api_key or not title:
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
         return ""
 
     style = get_config("ai_copy_style") or "urgencia_comparativo"
-    custom_instructions = (get_config("ai_copy_custom_prompt") or "").strip()
+    custom_prompt = (get_config("ai_copy_custom_prompt") or "").strip()
+    primary_model = (get_config("ai_copy_model") or "").strip()
+    if not primary_model:
+        return ""
 
-    has_price = bool(current_price)
-    p_val = float(current_price) if has_price else 0.0
-    multi_kit_nums = _detect_multi_kit_title(title)
-    has_range = bool(
-        is_starting_price
-        or (max_price and has_price and abs(float(max_price) - p_val) > 0.05)
-    )
+    style_map = {
+        "urgencia_comparativo": "Use gatilho de urgência e destaque o desconto/custo-benefício.",
+        "calculo_unitario": "Se for kit/pack, destaque o valor por unidade ou economia real.",
+        "achadinho_amigavel": "Use tom amigável de achadinho VIP que acabou de aparecer.",
+    }
+    style_hint = style_map.get(style, style_map["urgencia_comparativo"])
 
-    # Calcula o preço unitário no Python com 100% de precisão!
-    exact_qty, exact_unit_str = (
-        _calculate_exact_unit_price_in_python(title, p_val)
-        if (has_price and not has_range and not multi_kit_nums)
-        else (None, None)
-    )
-
-    rules = [
-        "- MÁXIMO de 80 caracteres (1 linha rápida para leitura instantânea no celular).",
-        "- NÃO repita o nome completo do produto e NÃO repita o preço total (pois o preço total já está logo abaixo).",
-    ]
-
-    if exact_qty and exact_unit_str and p_val <= 250.0:
-        style_hint = f"Destaque que neste kit com {exact_qty} unidades cada unidade sai por APENAS {exact_unit_str}!"
-        rules.append(
-            f"- ⚠️ MATEMÁTICA EXATA JÁ CALCULADA: São {exact_qty} unidades e cada unidade sai por EXATAMENTE {exact_unit_str}. "
-            f"Se citar valor por unidade, use OBRIGATORIAMENTE {exact_unit_str} (PROIBIDO inventar outro valor!)."
+    try:
+        cur_p = (
+            float(str(current_price).replace("R$", "").replace(",", ".").strip())
+            if current_price not in (None, "")
+            else None
         )
-    else:
-        style_hint = "Crie 1 frase curtíssima e magnética focada no benefício e urgência da oferta."
-        rules.append(
-            "- ⚠️ REGRA CRÍTICA: PROIBIDO citar qualquer valor em R$ e PROIBIDO fazer contas de divisão! Foque 100% na qualidade/oportunidade do produto."
+    except (ValueError, TypeError):
+        cur_p = None
+
+    try:
+        max_p = (
+            float(str(max_price).replace("R$", "").replace(",", ".").strip())
+            if max_price not in (None, "")
+            else None
         )
+    except (ValueError, TypeError):
+        max_p = None
+
+    price_info = f"R$ {cur_p:.2f}" if cur_p is not None else "preço promocional"
+    if is_starting_price and cur_p is not None:
+        price_info = f"a partir de {price_info}"
+    if max_p is not None and (cur_p is None or max_p > cur_p):
+        price_info += f" (até R$ {max_p:.2f})"
+    disc_info = f"{discount_pct}% OFF" if discount_pct else ""
 
     prompt = (
-        "Você é um copywriter de grupos VIP de ofertas no WhatsApp.\n"
-        "Escreva APENAS 1 chamada curta (máximo 80 caracteres) para o topo desta oferta:\n"
-        f"- Produto: {clean_product_title(title, 80)}\n"
-        f"- Diretriz: {style_hint}\n"
-        + "\n".join(rules)
-        + (f"\n- Extra: {custom_instructions}" if custom_instructions else "")
-        + "\nComece com 1 emoji (🚨, 😱, ⚡, 💥, 😍). Sem links, sem hashtags e sem aspas."
+        f"Crie UMA única frase curta e chamativa (máx 110 caracteres) em português do Brasil "
+        f"com 1 emoji no início para vender este produto da {store} no WhatsApp.\n"
+        f"Produto: {title}\nPreço: {price_info} {disc_info}\n"
+        f"Estilo: {style_hint}\n"
+        f"{f'Instrução extra: {custom_prompt}' if custom_prompt else ''}\n"
+        f"Responda APENAS com a frase pronta, sem aspas e sem explicações."
     )
 
-    payload_fast = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.45,
-            "maxOutputTokens": 100,
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
-        "Connection": "close",
-    }
-    models_to_try = _get_ordered_flash_models(api_key)
-
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        try:
-            with _force_ipv4_context():
-                resp = requests.post(
-                    url, headers=headers, json=payload_fast, timeout=(4, 8)
-                )
-            if resp.status_code != 200:
-                continue
-
-            data = resp.json()
-            candidates = data.get("candidates") or []
-            if not candidates:
-                continue
-
-            parts = (candidates[0].get("content") or {}).get("parts") or []
-            raw_hook = "".join(
-                p.get("text", "") for p in parts if not p.get("thought")
-            ).strip()
-            raw_hook = raw_hook.strip("\"'").replace("**", "").replace("*", "").strip()
-            raw_hook = " ".join(raw_hook.splitlines()).strip()
-
-            if not raw_hook:
-                continue
-
-            _LAST_WORKING_MODEL = model_name
-            return f"<b>{html.escape(raw_hook)}</b>"
-        except Exception:
+    # 1. Tenta o modelo principal (com 1 retry de 2s em caso de 503 ou 429)
+    for attempt in range(2):
+        text, status = _call_gemini_text(api_key, primary_model, prompt)
+        if text:
+            clean = text.replace('"', "").replace("\n", " ").strip()
+            return f"<b>{clean}</b>"
+        if status in (429, 503) and attempt == 0:
+            time.sleep(2.0)
             continue
+        break
+
+    # 2. Fallback SOMENTE para outros modelos que passaram no teste (status == "ok")
+    ok_backups = [
+        m["id"]
+        for m in get_cached_gemini_models()
+        if m.get("status") == "ok" and m.get("id") != primary_model
+    ]
+    for backup_id in ok_backups[:2]:
+        text, _ = _call_gemini_text(api_key, backup_id, prompt)
+        if text:
+            clean = text.replace('"', "").replace("\n", " ").strip()
+            return f"<b>{clean}</b>"
 
     return ""
 
 
+def clean_product_title(title: str, max_len: int = 85) -> str:
+    """Limpa espaços extras e corta títulos muito longos sem quebrar palavras."""
+    if not title:
+        return ""
+    clean = re.sub(r"\s+", " ", str(title)).strip()
+    if len(clean) <= max_len:
+        return clean
+    truncated = clean[:max_len].rsplit(" ", 1)[0].strip(" -|,;/")
+    return f"{truncated}..." if truncated else f"{clean[:max_len]}..."
+
+
 def prepend_ai_hook_to_message(
-    base_message: str,
-    title: str,
-    current_price: float | str | None,
-    original_price: float | str | None = None,
-    discount_pct: int | str | None = None,
+    message: str = "",
+    title: str = "",
+    current_price: float | None = None,
+    original_price: float | None = None,
+    discount_pct: str | int | None = None,
     store: str = "Shopee",
-    sales: int | str | None = None,
     force: bool = False,
-    max_price: float | str | None = None,
+    max_price: float | None = None,
     is_starting_price: bool = False,
+    **kwargs,
 ) -> str:
+    """Gera o gancho com IA e coloca no topo da mensagem formatada, se estiver ativo."""
+    msg = (
+        message
+        or kwargs.get("base_message")
+        or kwargs.get("formatted_message")
+        or kwargs.get("msg")
+        or ""
+    )
+    if not msg:
+        return ""
+    if current_price is None and "price" in kwargs:
+        current_price = kwargs.get("price")
+    if discount_pct is None and "discount" in kwargs:
+        discount_pct = kwargs.get("discount")
+
     hook = generate_ai_hook(
         title=title,
         current_price=current_price,
         original_price=original_price,
         discount_pct=discount_pct,
         store=store,
-        sales=sales,
         force=force,
         max_price=max_price,
         is_starting_price=is_starting_price,
     )
     if not hook:
-        return base_message
-    return f"{hook}\n\n{base_message}"
+        return msg
+    return f"{hook}\n\n{msg}"

@@ -11,6 +11,7 @@ import unicodedata
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from database import add_to_queue, is_offer_recent, get_config, update_config
+from requests.adapters import HTTPAdapter
 from offer_comparator import (
     is_product_recently_used_or_blocked,
     load_recent_queue_profiles,
@@ -83,6 +84,10 @@ class ShopeeAffiliateAPI:
     def __init__(self, app_id: str, app_secret: str):
         self.app_id = app_id
         self.app_secret = app_secret
+        self._session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10, max_retries=0)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     @staticmethod
     def get_available_shopee_categories() -> dict:
@@ -214,32 +219,70 @@ class ShopeeAffiliateAPI:
         factor = f"{self.app_id}{timestamp}{payload}{self.app_secret}"
         return hashlib.sha256(factor.encode("utf-8")).hexdigest()
 
-    def _graphql_request(self, query: str) -> dict:
+    def _graphql_request(
+        self, query: str, timeout: float = 12.0, max_retries: int = 2
+    ) -> dict:
         payload_str = json.dumps({"query": query})
-        timestamp = str(int(time.time()))
-        signature = self._sign(payload_str, timestamp)
 
-        headers = {
-            "Authorization": f"SHA256 Credential={self.app_id}, Timestamp={timestamp}, Signature={signature}",
-            "Content-Type": "application/json",
-        }
+        for attempt in range(max_retries + 1):
+            timestamp = str(int(time.time()))
+            signature = self._sign(payload_str, timestamp)
+            headers = {
+                "Authorization": f"SHA256 Credential={self.app_id}, Timestamp={timestamp}, Signature={signature}",
+                "Content-Type": "application/json",
+            }
 
-        try:
-            resp = requests.post(
-                self.GRAPHQL_URL,
-                data=payload_str.encode("utf-8"),
-                headers=headers,
-                timeout=20,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if "errors" in data:
-                logger.warning(f"Aviso GraphQL Shopee: {data['errors']}")
+            try:
+                resp = self._session.post(
+                    self.GRAPHQL_URL,
+                    data=payload_str.encode("utf-8"),
+                    headers=headers,
+                    timeout=timeout,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+                if "errors" in data:
+                    err = (data["errors"] or [{}])[0]
+                    code = (err.get("extensions") or {}).get("code")
+                    if code == 10000 and attempt < max_retries:
+                        wait = (2**attempt) * 0.8 + random.uniform(0, 0.5)
+                        logger.warning(
+                            f"Shopee 10000 — retry {attempt+1}/{max_retries} em {wait:.1f}s"
+                        )
+                        time.sleep(wait)
+                        continue
+                    logger.warning(f"Aviso GraphQL Shopee: {data['errors']}")
+                    return {}
+                return data.get("data", {})
+
+            except requests.exceptions.HTTPError as e:
+                status = getattr(e.response, "status_code", None)
+                if status in (429, 500, 502, 503, 504) and attempt < max_retries:
+                    wait = (2**attempt) * 1.0 + random.uniform(0, 0.5)
+                    logger.warning(
+                        f"HTTP {status} — retry {attempt+1}/{max_retries} em {wait:.1f}s"
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.error(f"HTTP {status} na requisição GraphQL Shopee: {e}")
                 return {}
-            return data.get("data", {})
-        except Exception as e:
-            logger.error(f"Erro na requisição GraphQL Shopee: {e}")
-            return {}
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries:
+                    logger.warning(f"Timeout Shopee — retry {attempt+1}/{max_retries}")
+                    time.sleep((2**attempt) * 0.5)
+                    continue
+                logger.error(
+                    f"Timeout na requisição GraphQL Shopee após {max_retries+1} tentativas"
+                )
+                return {}
+
+            except Exception as e:
+                logger.error(f"Erro na requisição GraphQL Shopee: {e}")
+                return {}
+
+        return {}
 
     def get_product_offer(self, item_id: int) -> dict | None:
         query = f"""query {{
@@ -723,6 +766,10 @@ class ShopeeAffiliateAPI:
         if not raw_categories:
             raw_categories = list(dynamic_categories.keys())[:3]
 
+        max_cats_per_run = max(5, min(8, categories_target + 2))
+        if len(raw_categories) > max_cats_per_run:
+            raw_categories = random.sample(raw_categories, k=max_cats_per_run)
+
         per_cat_desired = max(
             6, int(desired_cat_pool_size / max(1, len(raw_categories))) + 2
         )
@@ -747,11 +794,15 @@ class ShopeeAffiliateAPI:
                 if len(valid_by_cat[cat]) >= per_cat_desired:
                     break
 
-                chosen_page = random.choice([1, 2])
+                chosen_page = random.randint(1, 20)
                 nodes, _ = self.get_best_selling_offers(
                     keyword=term, page=chosen_page, limit=50
                 )
-                if not nodes and chosen_page != 1:
+                if not nodes and chosen_page > 5:
+                    nodes, _ = self.get_best_selling_offers(
+                        keyword=term, page=random.randint(1, 5), limit=50
+                    )
+                if not nodes:
                     nodes, _ = self.get_best_selling_offers(
                         keyword=term, page=1, limit=50
                     )
@@ -778,10 +829,14 @@ class ShopeeAffiliateAPI:
         gen_accepted_titles: list[str] = list(cat_accepted_titles)
         keywords = [k.strip() for k in (keywords_csv or "").split(",") if k.strip()]
 
-        for page_top in random.sample([1, 2, 3], k=2):
+        for page_top in random.sample(range(1, 31), k=2):
             if len(valid_general_pool) >= desired_general_pool_size:
                 break
             nodes, _ = self.get_top_performing_offers(page=page_top, limit=50)
+            if not nodes:
+                nodes, _ = self.get_top_performing_offers(
+                    page=random.randint(1, 5), limit=50
+                )
             if not nodes:
                 continue
             random.shuffle(nodes)
@@ -1005,7 +1060,7 @@ class ShopeeAffiliateAPI:
         logger.info(
             f"🔎 Iniciando varredura paginada na Shopee: meta={count} ({general_target} Geral / {categories_target} Categorias)..."
         )
-
+        t_harvest_start = time.perf_counter()
         valid_general_pool, valid_categories_pool, all_raw_backup = (
             self._harvest_valid_offers_deep(
                 target_date=target_date,
@@ -1018,6 +1073,8 @@ class ShopeeAffiliateAPI:
                 blocked_terms=combined_blocked,
             )
         )
+        t_harvest = time.perf_counter() - t_harvest_start
+        t_format_start = time.perf_counter()
 
         logger.info(
             f"🎯 Pools de inéditos prontos para sorteio: {len(valid_categories_pool)} de Categorias | {len(valid_general_pool)} Gerais."
@@ -1060,7 +1117,10 @@ class ShopeeAffiliateAPI:
                     or f"https://shopee.com.br/product/0/{b_id}"
                 )
                 if is_offer_recent(
-                    b_url, item_id=b_id, days=1, target_date=target_date
+                    b_url,
+                    item_id=b_id,
+                    days=max(3, dedup_days // 2),
+                    target_date=target_date,
                 ):
                     continue
                 already_chosen_ids.add(b_id)
@@ -1104,8 +1164,10 @@ class ShopeeAffiliateAPI:
             )
             added += 1
 
+        t_format = time.perf_counter() - t_format_start
         logger.info(
-            f"✅ Shopee Auto concluído: {added}/{count} ofertas inéditas sorteadas e inseridas na fila ({target_date})."
+            f"✅ Shopee Auto concluído: {added}/{count} ofertas ({target_date}) | "
+            f"⏱️ Busca={t_harvest:.1f}s | Format+IA={t_format:.1f}s"
         )
         return added
 
